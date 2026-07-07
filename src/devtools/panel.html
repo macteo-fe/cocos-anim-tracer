@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>AnimTracer</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <header class="toolbar">
+      <button id="btn-refresh" title="Refresh hierarchy">↻</button>
+      <label class="auto-refresh">
+        <input type="checkbox" id="auto-refresh" checked />
+        Auto
+      </label>
+      <span id="status" class="status">Waiting for Cocos…</span>
+    </header>
+
+    <div class="filter-bar">
+      <input type="search" id="search" placeholder="Filter by name…" />
+      <select id="component-filter" title="Filter by component">
+        <option value="">All components</option>
+      </select>
+      <button id="btn-clear-filters" title="Clear filters" hidden>✕</button>
+    </div>
+
+    <main class="layout">
+      <section class="tree-panel">
+        <div class="tree-toolbar">
+          <button id="btn-expand-all" type="button" title="Expand all nodes">Expand all</button>
+          <button id="btn-collapse-all" type="button" title="Collapse all nodes">Collapse all</button>
+        </div>
+        <div id="tree" class="tree"></div>
+      </section>
+      <section class="detail-panel">
+        <h2>Node Details</h2>
+        <div id="detail" class="detail empty">Select a node</div>
+      </section>
+    </main>
+
+    <script src="panel.js"></script>
+  </body>
+</html>
