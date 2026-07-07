@@ -14,6 +14,7 @@
   --inactive: #6a6a6a;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --mono: "SF Mono", Menlo, Consolas, monospace;
+  --tools-width: 320px;
 }
 
 * {
@@ -97,9 +98,18 @@ body {
   color: var(--danger);
 }
 
+.build-note {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  white-space: nowrap;
+  opacity: 0.95;
+}
+
 .layout {
   display: grid;
-  grid-template-columns: 1fr 280px;
+  grid-template-columns: 1fr 6px var(--tools-width);
   height: calc(100% - 73px);
   min-height: 0;
 }
@@ -162,9 +172,25 @@ body {
 
 .tree-panel {
   overflow: auto;
-  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+}
+
+.panel-resizer {
+  cursor: col-resize;
+  background: var(--bg3);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+
+.panel-resizer:hover,
+body.resizing .panel-resizer {
+  background: var(--accent-dim);
+}
+
+body.resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .tree-toolbar {
@@ -201,6 +227,143 @@ body {
   overflow: auto;
   padding: 8px;
   background: var(--bg2);
+}
+
+.tool-box {
+  margin-bottom: 10px;
+}
+
+.tool-box label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.tool-row {
+  display: flex;
+  gap: 6px;
+}
+
+.tool-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.tool-row button {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg3);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.tool-row button:hover {
+  border-color: var(--accent);
+}
+
+.tool-status {
+  margin-bottom: 10px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.tool-status.ok {
+  color: var(--success);
+}
+
+.tool-status.error {
+  color: var(--danger);
+}
+
+.reference-results {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  max-height: 170px;
+  overflow: auto;
+}
+
+.reference-results.empty {
+  padding: 8px;
+  color: var(--text-dim);
+}
+
+.reference-item {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 7px 8px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.reference-item:last-child {
+  border-bottom: 0;
+}
+
+.reference-item:hover {
+  background: rgba(55, 148, 255, 0.15);
+}
+
+.reference-item.active {
+  background: rgba(55, 148, 255, 0.22);
+}
+
+.reference-item-title {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.reference-item-meta {
+  display: block;
+  color: var(--text-dim);
+  font-size: 10px;
+  margin-top: 2px;
+}
+
+.suggestion-list {
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  max-height: 110px;
+  overflow: auto;
+}
+
+.suggestion-item {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 6px 8px;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.suggestion-item:last-child {
+  border-bottom: 0;
+}
+
+.suggestion-item:hover {
+  background: rgba(55, 148, 255, 0.15);
 }
 
 .detail-panel h2 {
@@ -253,6 +416,11 @@ body {
 .tree-row.filter-match > .node-name {
   color: var(--accent);
   font-weight: 600;
+}
+
+.tree-row.reference-highlight {
+  box-shadow: inset 0 0 0 1px rgba(255, 214, 102, 0.75);
+  background: rgba(255, 214, 102, 0.12);
 }
 
 .toggle {
@@ -359,10 +527,17 @@ body {
   display: inline-block;
   margin: 2px 4px 2px 0;
   padding: 2px 6px;
+  border: 1px solid transparent;
   border-radius: 3px;
   background: var(--bg3);
   font-family: var(--mono);
   font-size: 11px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.detail .component:hover {
+  border-color: var(--accent);
 }
 
 .detail .component.spine {

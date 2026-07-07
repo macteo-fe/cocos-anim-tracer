@@ -6,6 +6,18 @@ const componentFilterEl = document.getElementById("component-filter");
 const clearFiltersBtn = document.getElementById("btn-clear-filters");
 const expandAllBtn = document.getElementById("btn-expand-all");
 const collapseAllBtn = document.getElementById("btn-collapse-all");
+const layoutEl = document.querySelector(".layout");
+const toolsResizerEl = document.getElementById("tools-resizer");
+const refUuidInputEl = document.getElementById("ref-uuid-input");
+const findRefsBtn = document.getElementById("btn-find-refs");
+const spineTraceToolEl = document.getElementById("spine-trace-tool");
+const spineAnimationInputEl = document.getElementById("spine-animation-input");
+const spineAnimationSuggestionsEl = document.getElementById("spine-animation-suggestions");
+const spineAnimationSuggestionListEl = document.getElementById("spine-animation-suggestion-list");
+const traceSpineBtn = document.getElementById("btn-trace-spine");
+const referenceResultsEl = document.getElementById("reference-results");
+const toolStatusEl = document.getElementById("tool-status");
+const buildNoteEl = document.getElementById("build-note");
 const autoRefreshEl = document.getElementById("auto-refresh");
 const refreshBtn = document.getElementById("btn-refresh");
 
@@ -19,6 +31,11 @@ let nameFilter = "";
 let componentFilter = "";
 let refreshTimer = null;
 let port = null;
+let referenceResults = [];
+let highlightedReferenceNodeUuid = null;
+let spineAnimationNames = [];
+const TOOLS_MIN_WIDTH = 260;
+const TOOLS_MAX_WIDTH = 700;
 
 const EVAL_GET_HIERARCHY = `(() => {
   if (!window.__cocosHierarchyBridge__) return { ok: false, error: "Bridge not injected" };
@@ -29,8 +46,30 @@ const EVAL_SELECT = (uuid) => `(() => {
   return window.__cocosHierarchyBridge__?.selectNode(${JSON.stringify(uuid)}) ?? false;
 })()`;
 
+const EVAL_SELECT_COMPONENT = (uuid, componentIndex) => `(() => {
+  return window.__cocosHierarchyBridge__?.selectComponent(
+    ${JSON.stringify(uuid)},
+    ${JSON.stringify(componentIndex)}
+  ) ?? false;
+})()`;
+
 const EVAL_TOGGLE = (uuid) => `(() => {
   return window.__cocosHierarchyBridge__?.toggleActive(${JSON.stringify(uuid)}) ?? false;
+})()`;
+
+const EVAL_FIND_REFS = (uuid) => `(() => {
+  return window.__cocosHierarchyBridge__?.findNodeReferences(${JSON.stringify(uuid)}) ?? { ok: false, error: "Bridge not injected" };
+})()`;
+
+const EVAL_TRACE_SPINE = (uuid, animationName) => `(() => {
+  return window.__cocosHierarchyBridge__?.traceSpineAnimation(
+    ${JSON.stringify(uuid)},
+    ${JSON.stringify(animationName)}
+  ) ?? { ok: false, error: "Bridge not injected" };
+})()`;
+
+const EVAL_SPINE_ANIMATION_NAMES = (uuid) => `(() => {
+  return window.__cocosHierarchyBridge__?.getSpineAnimationNames(${JSON.stringify(uuid)}) ?? { ok: false, error: "Bridge not injected", names: [] };
 })()`;
 
 function evalInPage(expression, callback) {
@@ -46,6 +85,72 @@ function evalInPage(expression, callback) {
 function setStatus(text, type = "") {
   statusEl.textContent = text;
   statusEl.className = `status ${type}`;
+}
+
+function setToolStatus(text, type = "") {
+  toolStatusEl.textContent = text;
+  toolStatusEl.className = `tool-status ${type}`;
+}
+
+function setBuildNote() {
+  const info = window.__ANIMTRACER_BUILD_INFO__ || {};
+  const version = info.version || chrome.runtime?.getManifest?.().version || "dev";
+  const updateNote = info.updateNote || "local";
+  buildNoteEl.textContent = `v${version} • ${updateNote}`;
+}
+
+function initToolsPanelResizer() {
+  let isDragging = false;
+
+  const onPointerMove = (event) => {
+    if (!isDragging) return;
+    const rect = layoutEl.getBoundingClientRect();
+    const rightSideWidth = rect.right - event.clientX;
+    const maxAllowed = Math.max(TOOLS_MIN_WIDTH, rect.width - 220);
+    const width = Math.min(Math.max(rightSideWidth, TOOLS_MIN_WIDTH), Math.min(TOOLS_MAX_WIDTH, maxAllowed));
+    document.documentElement.style.setProperty("--tools-width", `${Math.round(width)}px`);
+  };
+
+  const onPointerUp = () => {
+    if (!isDragging) return;
+    isDragging = false;
+    document.body.classList.remove("resizing");
+    window.removeEventListener("pointermove", onPointerMove);
+    window.removeEventListener("pointerup", onPointerUp);
+  };
+
+  toolsResizerEl.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    isDragging = true;
+    document.body.classList.add("resizing");
+    toolsResizerEl.setPointerCapture(event.pointerId);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+  });
+}
+
+function setReferenceResults(items) {
+  referenceResults = Array.isArray(items) ? items : [];
+  if (!referenceResults.length) {
+    referenceResultsEl.className = "reference-results empty";
+    referenceResultsEl.textContent = "No references found.";
+    return;
+  }
+
+  referenceResultsEl.className = "reference-results";
+  referenceResultsEl.innerHTML = "";
+  referenceResults.forEach((hit) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "reference-item";
+    if (highlightedReferenceNodeUuid === hit.nodeUuid) btn.classList.add("active");
+    btn.innerHTML = `
+      <span class="reference-item-title">${escapeHtml(hit.hierarchyPath || hit.nodeName || hit.nodeUuid)}</span>
+      <span class="reference-item-meta">${escapeHtml(hit.componentName || "Component")} • ${escapeHtml(hit.nodeUuid || "")}</span>
+    `;
+    btn.addEventListener("click", () => focusReferenceHolder(hit.nodeUuid));
+    referenceResultsEl.appendChild(btn);
+  });
 }
 
 function hasActiveFilters() {
@@ -76,6 +181,71 @@ function getMatchingComponents(node) {
   return node.components.filter(
     (c) => c.toLowerCase() === componentFilter.toLowerCase()
   );
+}
+
+function nodeHasSkeletonComponent(node) {
+  if (!node?.components) return false;
+  return node.components.some((name) => /spine|skeleton/i.test(String(name)));
+}
+
+function updateSpineTraceToolVisibility(node) {
+  const visible = nodeHasSkeletonComponent(node);
+  spineTraceToolEl.hidden = !visible;
+  if (!visible) {
+    spineAnimationInputEl.value = "";
+    spineAnimationSuggestionsEl.innerHTML = "";
+    spineAnimationSuggestionListEl.hidden = true;
+    spineAnimationSuggestionListEl.innerHTML = "";
+    spineAnimationNames = [];
+  }
+}
+
+function renderSpineAnimationSuggestions(filterText = "") {
+  const q = String(filterText || "").toLowerCase().trim();
+  const names = q
+    ? spineAnimationNames.filter((name) => name.toLowerCase().includes(q))
+    : spineAnimationNames;
+  if (!names.length) {
+    spineAnimationSuggestionListEl.hidden = true;
+    spineAnimationSuggestionListEl.innerHTML = "";
+    return;
+  }
+  spineAnimationSuggestionListEl.hidden = false;
+  spineAnimationSuggestionListEl.innerHTML = "";
+  names.slice(0, 60).forEach((name) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "suggestion-item";
+    btn.textContent = name;
+    btn.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      spineAnimationInputEl.value = name;
+      spineAnimationSuggestionListEl.hidden = true;
+    });
+    spineAnimationSuggestionListEl.appendChild(btn);
+  });
+}
+
+function loadSpineAnimationSuggestions() {
+  const uuid = (refUuidInputEl.value || selectedUuid || "").trim();
+  if (!uuid || spineTraceToolEl.hidden) return;
+  evalInPage(EVAL_SPINE_ANIMATION_NAMES(uuid), (result, err) => {
+    if (err || !result?.ok) {
+      spineAnimationSuggestionsEl.innerHTML = "";
+      spineAnimationSuggestionListEl.hidden = true;
+      spineAnimationNames = [];
+      return;
+    }
+    const names = Array.isArray(result.names) ? result.names : [];
+    spineAnimationNames = names;
+    spineAnimationSuggestionsEl.innerHTML = "";
+    names.forEach((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      spineAnimationSuggestionsEl.appendChild(option);
+    });
+    renderSpineAnimationSuggestions(spineAnimationInputEl.value);
+  });
 }
 
 function collectComponentCounts(node, counts = new Map()) {
@@ -175,6 +345,36 @@ function ensureExpandedForFilter(node) {
   }
 }
 
+function expandPathToNode(root, targetUuid) {
+  if (!root) return false;
+  if (root.uuid === targetUuid) return true;
+  for (const child of root.children || []) {
+    if (expandPathToNode(child, targetUuid)) {
+      expanded.add(root.uuid);
+      collapsed.delete(root.uuid);
+      return true;
+    }
+  }
+  return false;
+}
+
+function focusReferenceHolder(nodeUuid) {
+  if (!hierarchy?.tree || !nodeUuid) return;
+  expansionMode = "default";
+  expandPathToNode(hierarchy.tree, nodeUuid);
+  highlightedReferenceNodeUuid = nodeUuid;
+  const node = findNode(hierarchy.tree, nodeUuid);
+  if (node) {
+    selectedUuid = nodeUuid;
+    refUuidInputEl.value = nodeUuid;
+    updateSpineTraceToolVisibility(node);
+    evalInPage(EVAL_SELECT(nodeUuid), () => {});
+    renderDetail(node);
+  }
+  renderTree();
+  setReferenceResults(referenceResults);
+}
+
 function updateClearFiltersButton() {
   clearFiltersBtn.hidden = !hasActiveFilters();
 }
@@ -203,6 +403,13 @@ function renderTree() {
   }
 
   renderNode(hierarchy.tree, 0, treeEl);
+  requestAnimationFrame(() => {
+    if (!highlightedReferenceNodeUuid) return;
+    const row = treeEl.querySelector(`.tree-row[data-uuid="${CSS.escape(highlightedReferenceNodeUuid)}"]`);
+    if (row) {
+      row.scrollIntoView({ block: "nearest" });
+    }
+  });
 }
 
 function renderNode(node, depth, container) {
@@ -219,10 +426,12 @@ function renderNode(node, depth, container) {
 
   const row = document.createElement("div");
   row.className = "tree-row";
+  row.dataset.uuid = node.uuid;
   if (!node.activeInHierarchy) row.classList.add("inactive");
   if (node.isSpine) row.classList.add("spine");
   if (isSelected) row.classList.add("selected");
   if (isDirectMatch) row.classList.add("filter-match");
+  if (highlightedReferenceNodeUuid === node.uuid) row.classList.add("reference-highlight");
   row.style.paddingLeft = `${depth * 12 + 4}px`;
 
   const toggle = document.createElement("span");
@@ -301,7 +510,16 @@ function findNode(node, uuid) {
 }
 
 function selectNode(node) {
+  const previousSelectedUuid = selectedUuid;
   selectedUuid = node.uuid;
+  refUuidInputEl.value = node.uuid;
+  if (previousSelectedUuid !== node.uuid) {
+    highlightedReferenceNodeUuid = null;
+    referenceResultsEl.className = "reference-results empty";
+    referenceResultsEl.textContent = "No results yet.";
+    referenceResults = [];
+  }
+  updateSpineTraceToolVisibility(node);
   evalInPage(EVAL_SELECT(node.uuid), () => {});
   renderDetail(node);
   renderTree();
@@ -317,9 +535,9 @@ function renderDetail(node) {
   detailEl.className = "detail";
   const pos = node.position;
   const comps = node.components
-    .map((c) => {
+    .map((c, i) => {
       const isSpine = /spine|skeleton/i.test(c);
-      return `<span class="component${isSpine ? " spine" : ""}">${escapeHtml(c)}</span>`;
+      return `<button class="component${isSpine ? " spine" : ""}" data-component-index="${i}" type="button" title="Set as $c in console">${escapeHtml(c)}</button>`;
     })
     .join("");
 
@@ -349,6 +567,21 @@ function renderDetail(node) {
 
   document.getElementById("btn-toggle").addEventListener("click", () => {
     evalInPage(EVAL_TOGGLE(node.uuid), () => refresh());
+  });
+
+  detailEl.querySelectorAll("[data-component-index]").forEach((el) => {
+    el.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const index = Number(el.getAttribute("data-component-index"));
+      evalInPage(EVAL_SELECT_COMPONENT(node.uuid, index), (ok) => {
+        if (ok) {
+          setToolStatus(`Selected component set to $c (${node.components[index] || "Component"})`, "ok");
+        } else {
+          setToolStatus("Failed to select component.", "error");
+        }
+      });
+    });
   });
 }
 
@@ -382,8 +615,15 @@ function refresh() {
 
     if (selectedUuid && hierarchy.tree) {
       const node = findNode(hierarchy.tree, selectedUuid);
-      if (node) renderDetail(node);
-      else selectedUuid = null;
+      if (node) {
+        updateSpineTraceToolVisibility(node);
+        renderDetail(node);
+      } else {
+        selectedUuid = null;
+        updateSpineTraceToolVisibility(null);
+      }
+    } else {
+      updateSpineTraceToolVisibility(null);
     }
 
     renderTree();
@@ -427,6 +667,68 @@ clearFiltersBtn.addEventListener("click", () => {
 });
 expandAllBtn.addEventListener("click", expandAll);
 collapseAllBtn.addEventListener("click", collapseAll);
+findRefsBtn.addEventListener("click", () => {
+  const uuid = (refUuidInputEl.value || selectedUuid || "").trim();
+  if (!uuid) {
+    setToolStatus("Enter/select a node UUID first.", "error");
+    return;
+  }
+  evalInPage(EVAL_FIND_REFS(uuid), (result, err) => {
+    if (err) {
+      setToolStatus(err, "error");
+      return;
+    }
+    if (!result?.ok) {
+      setToolStatus(result?.error || "Failed to find references.", "error");
+      setReferenceResults([]);
+      return;
+    }
+    highlightedReferenceNodeUuid = null;
+    setReferenceResults(result.hits || []);
+    setToolStatus(`Found ${result.count} reference(s). Click a result to focus in tree.`, "ok");
+    console.groupCollapsed(`[AnimTracer] Node references for ${result.target?.name || uuid}`);
+    console.log("Target:", result.target);
+    console.table(result.hits || []);
+    console.groupEnd();
+  });
+});
+traceSpineBtn.addEventListener("click", () => {
+  if (spineTraceToolEl.hidden) {
+    setToolStatus("Select a node with Skeleton/Spine component first.", "error");
+    return;
+  }
+  const uuid = (refUuidInputEl.value || selectedUuid || "").trim();
+  const animationName = (spineAnimationInputEl.value || "").trim();
+  if (!uuid) {
+    setToolStatus("Enter/select a node UUID first.", "error");
+    return;
+  }
+  if (!animationName) {
+    setToolStatus("Enter an animation name to trace.", "error");
+    return;
+  }
+  evalInPage(EVAL_TRACE_SPINE(uuid, animationName), (result, err) => {
+    if (err) {
+      setToolStatus(err, "error");
+      return;
+    }
+    if (!result?.ok) {
+      setToolStatus(result?.error || "Failed to attach trace.", "error");
+      return;
+    }
+    setToolStatus(result.message || "Spine trace attached.", "ok");
+  });
+});
+spineAnimationInputEl.addEventListener("focus", loadSpineAnimationSuggestions);
+spineAnimationInputEl.addEventListener("input", () => {
+  if (!spineAnimationNames.length) return;
+  renderSpineAnimationSuggestions(spineAnimationInputEl.value);
+});
+spineAnimationInputEl.addEventListener("blur", () => {
+  setTimeout(() => {
+    spineAnimationSuggestionListEl.hidden = true;
+  }, 120);
+});
 
 function connectPort() {
   try {
@@ -446,5 +748,8 @@ function connectPort() {
 }
 
 connectPort();
+initToolsPanelResizer();
+setBuildNote();
+updateSpineTraceToolVisibility(null);
 refresh();
 startAutoRefresh();

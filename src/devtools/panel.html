@@ -13,6 +13,7 @@
         Auto
       </label>
       <span id="status" class="status">Waiting for Cocos…</span>
+      <span id="build-note" class="build-note" title="AnimTracer build info"></span>
     </header>
 
     <div class="filter-bar">
@@ -31,12 +32,47 @@
         </div>
         <div id="tree" class="tree"></div>
       </section>
+      <div
+        id="tools-resizer"
+        class="panel-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize tools panel"
+      ></div>
       <section class="detail-panel">
+        <h2>Tools</h2>
+        <div class="tool-box">
+          <label for="ref-uuid-input">Find node references</label>
+          <div class="tool-row">
+            <input id="ref-uuid-input" type="text" placeholder="Node UUID (empty = selected node)" />
+            <button id="btn-find-refs" type="button">Find</button>
+          </div>
+        </div>
+        <div id="spine-trace-tool" class="tool-box" hidden>
+          <label for="spine-animation-input">Trace Spine animation</label>
+          <div class="tool-row">
+            <input
+              id="spine-animation-input"
+              type="text"
+              placeholder="Animation name"
+              list="spine-animation-suggestions"
+            />
+            <datalist id="spine-animation-suggestions"></datalist>
+            <button id="btn-trace-spine" type="button">Trace</button>
+          </div>
+          <div id="spine-animation-suggestion-list" class="suggestion-list" hidden></div>
+        </div>
+        <div class="tool-box">
+          <label>Reference results</label>
+          <div id="reference-results" class="reference-results empty">No results yet.</div>
+        </div>
+        <div id="tool-status" class="tool-status">Actions log to page console.</div>
         <h2>Node Details</h2>
         <div id="detail" class="detail empty">Select a node</div>
       </section>
     </main>
 
+    <script src="build-info.js"></script>
     <script src="panel.js"></script>
   </body>
 </html>
