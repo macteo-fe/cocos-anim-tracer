@@ -269,6 +269,69 @@ body.resizing {
   border-color: var(--accent);
 }
 
+.speed-row input[type="range"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.speed-row input[type="number"] {
+  width: 58px;
+  flex: 0 0 58px;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.speed-unit {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.speed-snaps {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.speed-snap {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg3);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.speed-snap:hover,
+.speed-snap.active {
+  border-color: var(--accent);
+  background: rgba(55, 148, 255, 0.15);
+}
+
+.pause-btn {
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.pause-btn:hover,
+.pause-btn.paused {
+  border-color: var(--accent);
+  background: rgba(55, 148, 255, 0.15);
+}
+
 .tool-status {
   margin-bottom: 10px;
   color: var(--text-dim);

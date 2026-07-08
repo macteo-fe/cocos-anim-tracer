@@ -1,12 +1,7 @@
 (function () {
-  const INJECTED_FLAG = "data-cocos-hierarchy-injected";
-
   function injectScript() {
-    if (document.documentElement.getAttribute(INJECTED_FLAG)) return;
-    document.documentElement.setAttribute(INJECTED_FLAG, "1");
-
     const script = document.createElement("script");
-    script.src = chrome.runtime.getURL("src/inject.js");
+    script.src = `${chrome.runtime.getURL("src/inject.js")}?v=${chrome.runtime.getManifest().version}`;
     script.onload = () => script.remove();
     (document.head || document.documentElement).appendChild(script);
   }

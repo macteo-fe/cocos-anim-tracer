@@ -1,7 +1,9 @@
 (function () {
-  if (window.__cocosHierarchyBridge__) return;
+  const BRIDGE_VERSION = 2;
+  if (window.__cocosHierarchyBridge__?.version >= BRIDGE_VERSION) return;
 
   const nodeCache = new Map();
+  let bridgePaused = false;
 
   function getCocos() {
     if (window.cc?.director) return window.cc;
@@ -336,6 +338,129 @@
     return { ok: true, names: Array.from(names).filter(Boolean).sort() };
   }
 
+  function setGameSpeed(speed) {
+    const cc = getCocos();
+    const director = cc?.director;
+    if (!director) return { ok: false, error: "Cocos director not found" };
+
+    const numericSpeed = Number(speed);
+    if (!Number.isFinite(numericSpeed) || numericSpeed <= 0) {
+      return { ok: false, error: "Speed must be greater than 0" };
+    }
+
+    const originalTick = director._originalTick ?? director.tick?.bind(director);
+    if (typeof originalTick !== "function") {
+      return { ok: false, error: "director.tick is not available" };
+    }
+
+    if (!director._originalTick) {
+      director._originalTick = originalTick;
+    }
+
+    director.tick = (dt, ...args) => {
+      originalTick(dt * numericSpeed, ...args);
+    };
+    director.__animTracerGameSpeed = numericSpeed;
+    return { ok: true, speed: numericSpeed };
+  }
+
+  function getGameSpeed() {
+    const cc = getCocos();
+    const director = cc?.director;
+    if (!director) return { ok: false, speed: 1 };
+    return { ok: true, speed: director.__animTracerGameSpeed ?? 1 };
+  }
+
+  function readPausedState(director) {
+    try {
+      if (director && typeof director.isPaused === "function") {
+        return director.isPaused();
+      }
+      if (director && typeof director.isPaused === "boolean") {
+        return director.isPaused;
+      }
+    } catch {
+      // Fall back to bridge-tracked state.
+    }
+    return bridgePaused;
+  }
+
+  function invokePause(cc) {
+    const director = cc?.director;
+    if (director && typeof director.pause === "function") {
+      director.pause.call(director);
+      return true;
+    }
+    const game = cc?.game;
+    if (game && typeof game.pause === "function") {
+      game.pause.call(game);
+      return true;
+    }
+    return false;
+  }
+
+  function invokeResume(cc) {
+    const director = cc?.director;
+    if (director && typeof director.resume === "function") {
+      director.resume.call(director);
+      return true;
+    }
+    const game = cc?.game;
+    if (game && typeof game.resume === "function") {
+      game.resume.call(game);
+      return true;
+    }
+    return false;
+  }
+
+  function togglePauseResume() {
+    const cc = getCocos();
+    if (!cc) return { ok: false, error: "Cocos runtime not found" };
+
+    const nextPaused = !bridgePaused;
+    try {
+      if (nextPaused) {
+        if (!invokePause(cc)) {
+          return { ok: false, error: "pause not available on director or game" };
+        }
+      } else if (!invokeResume(cc)) {
+        return { ok: false, error: "resume not available on director or game" };
+      }
+      bridgePaused = nextPaused;
+      return { ok: true, paused: bridgePaused };
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) };
+    }
+  }
+
+  function getPauseState() {
+    const cc = getCocos();
+    if (!cc) return { ok: false, paused: false };
+    const director = cc.director;
+    if (director) {
+      bridgePaused = readPausedState(director);
+    }
+    return { ok: true, paused: bridgePaused };
+  }
+
+  function setupPauseKeyboardShortcut() {
+    if (window.__animTracerPauseKeyHandler) return;
+    window.__animTracerPauseKeyHandler = (e) => {
+      if (e.code !== "KeyP") return;
+      const target = e.target;
+      if (
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+      e.preventDefault();
+      togglePauseResume();
+    };
+    window.addEventListener("keydown", window.__animTracerPauseKeyHandler);
+  }
+
   function notifyUpdate() {
     window.postMessage({ source: "cocos-hierarchy", type: "scene-changed" }, "*");
   }
@@ -359,6 +484,7 @@
     if (!cc) return false;
 
     hookDirector(cc);
+    setupPauseKeyboardShortcut();
 
     if (cc.game?.on) {
       cc.game.on("game_on_show", notifyUpdate);
@@ -375,6 +501,7 @@
   }
 
   window.__cocosHierarchyBridge__ = {
+    version: BRIDGE_VERSION,
     getHierarchy,
     selectNode,
     selectComponent,
@@ -383,6 +510,10 @@
     findNodeReferences,
     traceSpineAnimation,
     getSpineAnimationNames,
+    setGameSpeed,
+    getGameSpeed,
+    togglePauseResume,
+    getPauseState,
     init,
     isReady: () => !!getCocos(),
   };

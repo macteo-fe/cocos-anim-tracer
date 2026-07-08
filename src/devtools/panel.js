@@ -18,6 +18,9 @@ const traceSpineBtn = document.getElementById("btn-trace-spine");
 const referenceResultsEl = document.getElementById("reference-results");
 const toolStatusEl = document.getElementById("tool-status");
 const buildNoteEl = document.getElementById("build-note");
+const gameSpeedRangeEl = document.getElementById("game-speed-range");
+const gameSpeedInputEl = document.getElementById("game-speed-input");
+const pauseResumeBtnEl = document.getElementById("btn-pause-resume");
 const autoRefreshEl = document.getElementById("auto-refresh");
 const refreshBtn = document.getElementById("btn-refresh");
 
@@ -72,10 +75,36 @@ const EVAL_SPINE_ANIMATION_NAMES = (uuid) => `(() => {
   return window.__cocosHierarchyBridge__?.getSpineAnimationNames(${JSON.stringify(uuid)}) ?? { ok: false, error: "Bridge not injected", names: [] };
 })()`;
 
+const EVAL_SET_GAME_SPEED = (speed) => `(() => {
+  return window.__cocosHierarchyBridge__?.setGameSpeed(${speed}) ?? { ok: false, error: "Bridge not injected" };
+})()`;
+
+const EVAL_GET_GAME_SPEED = `(() => {
+  return window.__cocosHierarchyBridge__?.getGameSpeed() ?? { ok: false, speed: 1 };
+})()`;
+
+const EVAL_TOGGLE_PAUSE = `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.togglePauseResume !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page" };
+  }
+  return bridge.togglePauseResume();
+})()`;
+
+const EVAL_GET_PAUSE_STATE = `(() => {
+  return window.__cocosHierarchyBridge__?.getPauseState() ?? { ok: false, paused: false };
+})()`;
+
 function evalInPage(expression, callback) {
   chrome.devtools.inspectedWindow.eval(expression, (result, exceptionInfo) => {
     if (exceptionInfo?.isException) {
-      callback(null, exceptionInfo.value?.description || "Eval error");
+      const value = exceptionInfo.value;
+      const message =
+        value?.description ||
+        value?.value ||
+        (typeof value === "string" ? value : null) ||
+        "Eval error";
+      callback(null, message);
       return;
     }
     callback(result, null);
@@ -97,6 +126,61 @@ function setBuildNote() {
   const version = info.version || chrome.runtime?.getManifest?.().version || "dev";
   const updateNote = info.updateNote || "local";
   buildNoteEl.textContent = `v${version} • ${updateNote}`;
+}
+
+function clampGameSpeed(speed) {
+  const value = Number(speed);
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(10, Math.max(0.1, value));
+}
+
+function updateGameSpeedUI(speed) {
+  const value = clampGameSpeed(speed);
+  gameSpeedRangeEl.value = String(value);
+  gameSpeedInputEl.value = String(value);
+  document.querySelectorAll(".speed-snap").forEach((btn) => {
+    btn.classList.toggle("active", Number(btn.dataset.speed) === value);
+  });
+}
+
+function applyGameSpeed(speed) {
+  const value = clampGameSpeed(speed);
+  updateGameSpeedUI(value);
+  evalInPage(EVAL_SET_GAME_SPEED(value), (result, err) => {
+    if (err || !result?.ok) {
+      setToolStatus(result?.error || err || "Failed to set game speed.", "error");
+      return;
+    }
+    setToolStatus(`Game speed set to ${result.speed}x`, "ok");
+  });
+}
+
+function syncGameSpeedFromPage() {
+  evalInPage(EVAL_GET_GAME_SPEED, (result) => {
+    if (result?.ok) updateGameSpeedUI(result.speed);
+  });
+}
+
+function updatePauseResumeUI(paused) {
+  pauseResumeBtnEl.textContent = paused ? "Resume" : "Pause";
+  pauseResumeBtnEl.classList.toggle("paused", paused);
+}
+
+function togglePauseResume() {
+  evalInPage(EVAL_TOGGLE_PAUSE, (result, err) => {
+    if (err || !result?.ok) {
+      setToolStatus(result?.error || err || "Failed to toggle pause.", "error");
+      return;
+    }
+    updatePauseResumeUI(result.paused);
+    setToolStatus(result.paused ? "Game paused" : "Game resumed", "ok");
+  });
+}
+
+function syncPauseStateFromPage() {
+  evalInPage(EVAL_GET_PAUSE_STATE, (result) => {
+    if (result?.ok) updatePauseResumeUI(result.paused);
+  });
 }
 
 function initToolsPanelResizer() {
@@ -729,6 +813,18 @@ spineAnimationInputEl.addEventListener("blur", () => {
     spineAnimationSuggestionListEl.hidden = true;
   }, 120);
 });
+gameSpeedRangeEl.addEventListener("input", () => {
+  applyGameSpeed(gameSpeedRangeEl.value);
+});
+gameSpeedInputEl.addEventListener("change", () => {
+  applyGameSpeed(gameSpeedInputEl.value);
+});
+document.querySelectorAll(".speed-snap").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    applyGameSpeed(btn.dataset.speed);
+  });
+});
+pauseResumeBtnEl.addEventListener("click", togglePauseResume);
 
 function connectPort() {
   try {
@@ -750,6 +846,8 @@ function connectPort() {
 connectPort();
 initToolsPanelResizer();
 setBuildNote();
+syncGameSpeedFromPage();
+syncPauseStateFromPage();
 updateSpineTraceToolVisibility(null);
 refresh();
 startAutoRefresh();
