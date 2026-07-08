@@ -21,6 +21,7 @@ const buildNoteEl = document.getElementById("build-note");
 const gameSpeedRangeEl = document.getElementById("game-speed-range");
 const gameSpeedInputEl = document.getElementById("game-speed-input");
 const pauseResumeBtnEl = document.getElementById("btn-pause-resume");
+const themeToggleBtnEl = document.getElementById("btn-theme-toggle");
 const autoRefreshEl = document.getElementById("auto-refresh");
 const refreshBtn = document.getElementById("btn-refresh");
 
@@ -39,6 +40,67 @@ let highlightedReferenceNodeUuid = null;
 let spineAnimationNames = [];
 const TOOLS_MIN_WIDTH = 260;
 const TOOLS_MAX_WIDTH = 700;
+const THEME_STORAGE_KEY = "animtracer-theme-preference";
+
+let themePreference = "auto";
+
+function devToolsThemeToPanel(theme) {
+  return theme === "dark" ? "dark" : "light";
+}
+
+function getDevToolsTheme() {
+  try {
+    return devToolsThemeToPanel(chrome.devtools.panels.themeName);
+  } catch {
+    return "dark";
+  }
+}
+
+function getEffectiveTheme() {
+  if (themePreference === "light" || themePreference === "dark") {
+    return themePreference;
+  }
+  return getDevToolsTheme();
+}
+
+function updateThemeToggleUI(theme) {
+  themeToggleBtnEl.classList.toggle("theme-auto", themePreference === "auto");
+  const modeLabel = themePreference === "auto" ? "matching DevTools" : "manual";
+  themeToggleBtnEl.title = `Theme: ${theme === "dark" ? "Dark" : "Light"} (${modeLabel}). Click to toggle. Shift+click to match DevTools.`;
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  updateThemeToggleUI(theme);
+}
+
+function initTheme() {
+  const saved = localStorage.getItem(THEME_STORAGE_KEY);
+  if (saved === "light" || saved === "dark" || saved === "auto") {
+    themePreference = saved;
+  }
+  applyTheme(getEffectiveTheme());
+
+  if (chrome.devtools?.panels?.setThemeChangeHandler) {
+    chrome.devtools.panels.setThemeChangeHandler((theme) => {
+      if (themePreference === "auto") {
+        applyTheme(devToolsThemeToPanel(theme));
+      }
+    });
+  }
+}
+
+function toggleThemePreference(shiftKey) {
+  if (shiftKey) {
+    themePreference = "auto";
+  } else if (themePreference === "auto") {
+    themePreference = getEffectiveTheme() === "dark" ? "light" : "dark";
+  } else {
+    themePreference = themePreference === "dark" ? "light" : "dark";
+  }
+  localStorage.setItem(THEME_STORAGE_KEY, themePreference);
+  applyTheme(getEffectiveTheme());
+}
 
 const EVAL_GET_HIERARCHY = `(() => {
   if (!window.__cocosHierarchyBridge__) return { ok: false, error: "Bridge not injected" };
@@ -825,6 +887,9 @@ document.querySelectorAll(".speed-snap").forEach((btn) => {
   });
 });
 pauseResumeBtnEl.addEventListener("click", togglePauseResume);
+themeToggleBtnEl.addEventListener("click", (event) => {
+  toggleThemePreference(event.shiftKey);
+});
 
 function connectPort() {
   try {
@@ -844,6 +909,7 @@ function connectPort() {
 }
 
 connectPort();
+initTheme();
 initToolsPanelResizer();
 setBuildNote();
 syncGameSpeedFromPage();
