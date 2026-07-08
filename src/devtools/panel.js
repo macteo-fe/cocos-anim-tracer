@@ -15,6 +15,7 @@ const spineAnimationInputEl = document.getElementById("spine-animation-input");
 const spineAnimationSuggestionsEl = document.getElementById("spine-animation-suggestions");
 const spineAnimationSuggestionListEl = document.getElementById("spine-animation-suggestion-list");
 const traceSpineBtn = document.getElementById("btn-trace-spine");
+const clearSpineTraceBtn = document.getElementById("btn-clear-spine-trace");
 const referenceResultsEl = document.getElementById("reference-results");
 const toolStatusEl = document.getElementById("tool-status");
 const buildNoteEl = document.getElementById("build-note");
@@ -131,6 +132,14 @@ const EVAL_TRACE_SPINE = (uuid, animationName) => `(() => {
     ${JSON.stringify(uuid)},
     ${JSON.stringify(animationName)}
   ) ?? { ok: false, error: "Bridge not injected" };
+})()`;
+
+const EVAL_CLEAR_SPINE_TRACE = (uuid) => `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.clearSpineAnimationTrace !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page" };
+  }
+  return bridge.clearSpineAnimationTrace(${JSON.stringify(uuid)});
 })()`;
 
 const EVAL_SPINE_ANIMATION_NAMES = (uuid) => `(() => {
@@ -863,6 +872,28 @@ traceSpineBtn.addEventListener("click", () => {
       return;
     }
     setToolStatus(result.message || "Spine trace attached.", "ok");
+  });
+});
+clearSpineTraceBtn.addEventListener("click", () => {
+  if (spineTraceToolEl.hidden) {
+    setToolStatus("Select a node with Skeleton/Spine component first.", "error");
+    return;
+  }
+  const uuid = (refUuidInputEl.value || selectedUuid || "").trim();
+  if (!uuid) {
+    setToolStatus("Enter/select a node UUID first.", "error");
+    return;
+  }
+  evalInPage(EVAL_CLEAR_SPINE_TRACE(uuid), (result, err) => {
+    if (err) {
+      setToolStatus(err, "error");
+      return;
+    }
+    if (!result?.ok) {
+      setToolStatus(result?.error || "Failed to clear trace.", "error");
+      return;
+    }
+    setToolStatus(result.message || "Spine trace cleared.", "ok");
   });
 });
 spineAnimationInputEl.addEventListener("focus", loadSpineAnimationSuggestions);

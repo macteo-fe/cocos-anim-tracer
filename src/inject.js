@@ -1,5 +1,5 @@
 (function () {
-  const BRIDGE_VERSION = 2;
+  const BRIDGE_VERSION = 3;
   if (window.__cocosHierarchyBridge__?.version >= BRIDGE_VERSION) return;
 
   const nodeCache = new Map();
@@ -289,6 +289,46 @@
     return { ok: true, message: `Tracing animation "${anim}" on node "${node.name}"` };
   }
 
+  function restoreSpineTraceHooks(spine) {
+    if (!spine) return false;
+    let cleared = false;
+    if (spine.__animTracerOriginalSetAnimation) {
+      spine.setAnimation = spine.__animTracerOriginalSetAnimation;
+      delete spine.__animTracerOriginalSetAnimation;
+      cleared = true;
+    }
+    if (spine.__animTracerOriginalAddAnimation) {
+      spine.addAnimation = spine.__animTracerOriginalAddAnimation;
+      delete spine.__animTracerOriginalAddAnimation;
+      cleared = true;
+    }
+    if (spine.__animTracerTraceAnimationName !== undefined) {
+      delete spine.__animTracerTraceAnimationName;
+      cleared = true;
+    }
+    return cleared;
+  }
+
+  function clearSpineAnimationTrace(nodeUuid) {
+    const uuid = String(nodeUuid || "").trim();
+    if (!uuid) return { ok: false, error: "Node UUID is required" };
+
+    const node = getNodeByUuid(uuid);
+    if (!node) return { ok: false, error: `Node not found for UUID: ${uuid}` };
+
+    const spine = findSpineComponent(node);
+    if (!spine) return { ok: false, error: "Selected node has no Spine/Skeleton component" };
+
+    const cleared = restoreSpineTraceHooks(spine);
+    return {
+      ok: true,
+      cleared,
+      message: cleared
+        ? `Cleared spine trace on node "${node.name}"`
+        : "No active spine trace on this node",
+    };
+  }
+
   function getSpineAnimationNames(nodeUuid) {
     const uuid = String(nodeUuid || "").trim();
     if (!uuid) return { ok: false, error: "Node UUID is required", names: [] };
@@ -509,6 +549,7 @@
     setActive,
     findNodeReferences,
     traceSpineAnimation,
+    clearSpineAnimationTrace,
     getSpineAnimationNames,
     setGameSpeed,
     getGameSpeed,
