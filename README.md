@@ -9,8 +9,6 @@ It adds a custom DevTools tab named `AnimTracer` and shows:
 - Filters by node name and component
 - Expand/collapse controls for hierarchy navigation
 
-![AnimTracer DevTools panel](readme-img/screenshot.png)
-
 ## Features
 
 - Live Cocos scene hierarchy view
