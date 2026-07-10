@@ -424,8 +424,11 @@ body.resizing {
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--bg);
-  max-height: 170px;
+  height: 170px;
+  min-height: 60px;
+  max-height: 60vh;
   overflow: auto;
+  resize: vertical;
 }
 
 .reference-results.empty {

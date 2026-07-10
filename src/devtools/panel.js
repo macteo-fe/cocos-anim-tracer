@@ -124,7 +124,159 @@ const EVAL_TOGGLE = (uuid) => `(() => {
 })()`;
 
 const EVAL_FIND_REFS = (uuid) => `(() => {
-  return window.__cocosHierarchyBridge__?.findNodeReferences(${JSON.stringify(uuid)}) ?? { ok: false, error: "Bridge not injected" };
+  const targetUuid = ${JSON.stringify(uuid)};
+  const cc = window.cc?.director ? window.cc : (window.cocos?.director ? window.cocos : null);
+  const scene = cc?.director?.getScene?.();
+  if (!scene) return { ok: false, error: "No active scene" };
+
+  function getNodePath(node) {
+    const parts = [];
+    let curr = node;
+    while (curr) {
+      parts.push(curr.name || "(unnamed)");
+      curr = curr.parent || null;
+    }
+    return parts.reverse().join("/");
+  }
+
+  function findNodeByUuid(root, id) {
+    if (!root) return null;
+    if (root.uuid === id) return root;
+    const children = root.children || [];
+    for (const child of children) {
+      const found = findNodeByUuid(child, id);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function isSkippedRefKey(key, depth) {
+    if (!key || key.startsWith("__")) return true;
+    if (
+      key === "constructor" || key === "prototype" ||
+      key === "_id" || key === "_objFlags" || key === "_name" || key === "_enabled" ||
+      key === "_parent" || key === "_children" || key === "_components" ||
+      key === "_scene" || key === "_eventProcessor" || key === "_persistNode" ||
+      key === "pos" || key === "rot" || key === "scale"
+    ) return true;
+    if (depth === 0 && (key === "node" || key === "_node")) return true;
+    return false;
+  }
+
+  function collectOwnKeys(value) {
+    const keys = new Set();
+    try { Object.keys(value).forEach((k) => keys.add(k)); } catch {}
+    try { Object.getOwnPropertyNames(value).forEach((k) => keys.add(k)); } catch {}
+    try {
+      const declared = value.constructor?.__values__ || value.constructor?.__props__;
+      if (Array.isArray(declared)) declared.forEach((k) => keys.add(k));
+    } catch {}
+    return keys;
+  }
+
+  function safeReadOwn(value, key) {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, key)) {
+        const desc = Object.getOwnPropertyDescriptor(value, key);
+        if (desc && "value" in desc) return desc.value;
+        return value[key];
+      }
+      const privateKey = key[0] === "_" ? null : ("_" + key);
+      if (privateKey && Object.prototype.hasOwnProperty.call(value, privateKey)) {
+        return value[privateKey];
+      }
+      // Never read prototype getters — they trigger Cocos deprecation errors.
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function isNodeLike(value, target) {
+    if (!value || typeof value !== "object") return false;
+    if (value === target) return true;
+    try {
+      return !!(value.uuid && target.uuid && value.uuid === target.uuid && value._components);
+    } catch {
+      return false;
+    }
+  }
+
+  function shouldNotDescend(value) {
+    if (!value || typeof value !== "object") return true;
+    if (Array.isArray(value)) return false;
+    if (ArrayBuffer.isView(value)) return true;
+    const name = value.constructor?.name || "";
+    if (/^(Vec2|Vec3|Vec4|Color|Quat|Mat3|Mat4|Size|Rect|Node|Scene|Component|Asset|Texture2D|TextureBase|TextureCube|Material|Mesh|MeshBuffer|Pass|Device|Camera|RenderTexture|SpriteFrame|BitmapFont|Font|EffectAsset|Graphics|UITransform|UIOpacity|Widget|Label|Sprite|RichText|Layout|Mask|Canvas|Model|SubModel|Renderer|Renderable2D|Batcher2D|NodeEventProcessor|SystemEvent)$/.test(name)) {
+      return true;
+    }
+    try {
+      if (value.uuid && value._components) return true;
+      if (value.node && value.uuid === undefined && value._id !== undefined) return true;
+    } catch {}
+    return false;
+  }
+
+  function scanObjectForNodeRef(value, target, visited, depth, path) {
+    if (!value || depth > 3) return [];
+    if (typeof value !== "object") return [];
+    if (visited.has(value)) return [];
+    visited.add(value);
+    const hits = [];
+    for (const key of collectOwnKeys(value)) {
+      if (isSkippedRefKey(key, depth)) continue;
+      const child = safeReadOwn(value, key);
+      if (child == null || typeof child === "function") continue;
+      const isIndex = Array.isArray(value) && /^\\d+$/.test(key);
+      const fieldPath = path
+        ? (isIndex ? path + "[" + key + "]" : path + "." + key)
+        : String(key).replace(/^_/, "");
+      if (isNodeLike(child, target)) {
+        hits.push(fieldPath);
+        continue;
+      }
+      if (shouldNotDescend(child)) continue;
+      hits.push(...scanObjectForNodeRef(child, target, visited, depth + 1, fieldPath));
+    }
+    return hits;
+  }
+
+  const target = findNodeByUuid(scene, String(targetUuid || "").trim());
+  if (!target) return { ok: false, error: "Node not found for UUID: " + targetUuid };
+
+  const hits = [];
+  const stack = [scene];
+  while (stack.length) {
+    const node = stack.pop();
+    const comps = node?._components || [];
+    for (const comp of comps) {
+      if (!comp) continue;
+      const fieldNames = scanObjectForNodeRef(comp, target, new WeakSet(), 0, "");
+      if (!fieldNames.length) continue;
+      let compName = comp.constructor?.name || "Component";
+      try {
+        if (cc?.js?.getClassName) compName = cc.js.getClassName(comp) || compName;
+      } catch {}
+      for (const fieldName of fieldNames) {
+        hits.push({
+          nodeUuid: node.uuid,
+          nodeName: node.name || "(unnamed)",
+          hierarchyPath: getNodePath(node),
+          componentName: compName || "Component",
+          fieldName: fieldName || "(unknown field)",
+        });
+      }
+    }
+    const children = node?.children || [];
+    for (const child of children) stack.push(child);
+  }
+
+  return {
+    ok: true,
+    target: { uuid: target.uuid, name: target.name, path: getNodePath(target) },
+    count: hits.length,
+    hits,
+  };
 })()`;
 
 const EVAL_TRACE_SPINE = (uuid, animationName) => `(() => {
@@ -299,9 +451,10 @@ function setReferenceResults(items) {
     btn.type = "button";
     btn.className = "reference-item";
     if (highlightedReferenceNodeUuid === hit.nodeUuid) btn.classList.add("active");
+    const fieldLabel = hit.fieldName ? ` • ${escapeHtml(hit.fieldName)}` : " • (unknown field)";
     btn.innerHTML = `
       <span class="reference-item-title">${escapeHtml(hit.hierarchyPath || hit.nodeName || hit.nodeUuid)}</span>
-      <span class="reference-item-meta">${escapeHtml(hit.componentName || "Component")} • ${escapeHtml(hit.nodeUuid || "")}</span>
+      <span class="reference-item-meta">${escapeHtml(hit.componentName || "Component")}${fieldLabel} • ${escapeHtml(hit.nodeUuid || "")}</span>
     `;
     btn.addEventListener("click", () => focusReferenceHolder(hit.nodeUuid));
     referenceResultsEl.appendChild(btn);

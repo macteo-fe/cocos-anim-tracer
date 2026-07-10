@@ -1,9 +1,14 @@
 (function () {
-  const BRIDGE_VERSION = 3;
-  if (window.__cocosHierarchyBridge__?.version >= BRIDGE_VERSION) return;
+  const BRIDGE_VERSION = 6;
+  // Always refresh bridge API so extension reloads apply even if an older
+  // inject already set window.__cocosHierarchyBridge__.
 
   const nodeCache = new Map();
   let bridgePaused = false;
+  try {
+    const prev = window.__cocosHierarchyBridge__?.getPauseState?.();
+    if (prev?.ok) bridgePaused = !!prev.paused;
+  } catch {}
 
   function getCocos() {
     if (window.cc?.director) return window.cc;
@@ -146,27 +151,124 @@
     return null;
   }
 
-  function scanObjectForNodeRef(value, target, visited, depth) {
-    if (!value || depth > 4) return false;
-    const t = typeof value;
-    if (t !== "object" && t !== "function") return false;
+  function isSkippedRefKey(key, depth) {
+    if (!key || key.startsWith("__")) return true;
+    if (
+      key === "constructor" ||
+      key === "prototype" ||
+      key === "_id" ||
+      key === "_objFlags" ||
+      key === "_name" ||
+      key === "_enabled" ||
+      key === "_parent" ||
+      key === "_children" ||
+      key === "_components" ||
+      key === "_scene" ||
+      key === "_eventProcessor" ||
+      key === "_persistNode" ||
+      key === "pos" ||
+      key === "rot" ||
+      key === "scale"
+    ) {
+      return true;
+    }
+    if (depth === 0 && (key === "node" || key === "_node")) return true;
+    return false;
+  }
+
+  function collectOwnKeys(value) {
+    const keys = new Set();
+    // Own keys only — never walk prototypes (Cocos proto getters spam deprecation errors).
+    try {
+      Object.keys(value).forEach((key) => keys.add(key));
+    } catch {}
+    try {
+      Object.getOwnPropertyNames(value).forEach((key) => keys.add(key));
+    } catch {}
+    try {
+      const declared = value.constructor?.__values__ || value.constructor?.__props__;
+      if (Array.isArray(declared)) declared.forEach((key) => keys.add(key));
+    } catch {}
+    return keys;
+  }
+
+  function safeReadOwn(value, key) {
+    try {
+      if (Object.prototype.hasOwnProperty.call(value, key)) {
+        const desc = Object.getOwnPropertyDescriptor(value, key);
+        if (desc && "value" in desc) return desc.value;
+        return value[key];
+      }
+      // Cocos @property storage is usually `_fieldName` on the instance.
+      const privateKey = key[0] === "_" ? null : `_${key}`;
+      if (privateKey && Object.prototype.hasOwnProperty.call(value, privateKey)) {
+        return value[privateKey];
+      }
+      // Never read prototype getters — they trigger Cocos deprecation errors.
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function isNodeLike(value, target) {
+    if (!value || typeof value !== "object") return false;
     if (value === target) return true;
-    if (visited.has(value)) return false;
+    try {
+      return !!(value.uuid && target.uuid && value.uuid === target.uuid && value._components);
+    } catch {
+      return false;
+    }
+  }
+
+  function shouldNotDescend(value) {
+    if (!value || typeof value !== "object") return true;
+    if (Array.isArray(value)) return false;
+    if (ArrayBuffer.isView(value)) return true;
+    const name = value.constructor?.name || "";
+    if (
+      /^(Vec2|Vec3|Vec4|Color|Quat|Mat3|Mat4|Size|Rect|Node|Scene|Component|Asset|Texture2D|TextureBase|TextureCube|Material|Mesh|MeshBuffer|Pass|Device|Camera|RenderTexture|SpriteFrame|BitmapFont|Font|EffectAsset|Graphics|UITransform|UIOpacity|Widget|Label|Sprite|RichText|Layout|Mask|Canvas|Model|SubModel|Renderer|Renderable2D|Batcher2D|NodeEventProcessor|SystemEvent)$/.test(
+        name
+      )
+    ) {
+      return true;
+    }
+    // Node / component shaped objects
+    try {
+      if (value.uuid && value._components) return true;
+      if (value.node && value.uuid === undefined && value._id !== undefined) return true;
+    } catch {}
+    return false;
+  }
+
+  function scanObjectForNodeRef(value, target, visited, depth, path) {
+    if (!value || depth > 3) return [];
+    if (typeof value !== "object") return [];
+    if (visited.has(value)) return [];
     visited.add(value);
 
-    const keys = Object.keys(value);
-    for (const key of keys) {
-      if (key[0] === "_") continue;
-      let child;
-      try {
-        child = value[key];
-      } catch {
+    const hits = [];
+    for (const key of collectOwnKeys(value)) {
+      if (isSkippedRefKey(key, depth)) continue;
+
+      const child = safeReadOwn(value, key);
+      if (child == null || typeof child === "function") continue;
+
+      const isIndex = Array.isArray(value) && /^\d+$/.test(key);
+      const fieldPath = path
+        ? isIndex
+          ? `${path}[${key}]`
+          : `${path}.${key}`
+        : key.replace(/^_/, "");
+
+      if (isNodeLike(child, target)) {
+        hits.push(fieldPath);
         continue;
       }
-      if (child === target) return true;
-      if (scanObjectForNodeRef(child, target, visited, depth + 1)) return true;
+      if (shouldNotDescend(child)) continue;
+      hits.push(...scanObjectForNodeRef(child, target, visited, depth + 1, fieldPath));
     }
-    return false;
+    return hits;
   }
 
   function findNodeReferences(targetUuid) {
@@ -188,15 +290,18 @@
       for (const comp of comps) {
         if (!comp) continue;
         const visited = new WeakSet();
-        if (scanObjectForNodeRef(comp, target, visited, 0)) {
-          const compName =
-            comp.constructor?.name ||
-            (cc?.js?.getClassName ? cc.js.getClassName(comp) : "Component");
+        const fieldNames = scanObjectForNodeRef(comp, target, visited, 0, "");
+        if (!fieldNames.length) continue;
+        const compName =
+          comp.constructor?.name ||
+          (cc?.js?.getClassName ? cc.js.getClassName(comp) : "Component");
+        for (const fieldName of fieldNames) {
           hits.push({
             nodeUuid: node.uuid,
             nodeName: node.name || "(unnamed)",
             hierarchyPath: getNodePath(node),
             componentName: compName || "Component",
+            fieldName,
           });
         }
       }
@@ -530,11 +635,14 @@
       cc.game.on("game_on_show", notifyUpdate);
     }
 
-    console.log(
-      "%c Cocos Hierarchy %c Runtime detected ",
-      "background:#1a73e8;padding:2px 6px;border-radius:3px 0 0 3px;color:#fff",
-      "background:#34a853;padding:2px 6px;border-radius:0 3px 3px 0;color:#fff"
-    );
+    if (!window.__animTracerBridgeReadyLogged) {
+      window.__animTracerBridgeReadyLogged = true;
+      console.log(
+        "%c Cocos Hierarchy %c Runtime detected ",
+        "background:#1a73e8;padding:2px 6px;border-radius:3px 0 0 3px;color:#fff",
+        "background:#34a853;padding:2px 6px;border-radius:0 3px 3px 0;color:#fff"
+      );
+    }
 
     notifyUpdate();
     return true;
