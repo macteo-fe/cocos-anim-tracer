@@ -1,5 +1,5 @@
 (function () {
-  const BRIDGE_VERSION = 8;
+  const BRIDGE_VERSION = 9;
   // Always refresh bridge API so extension reloads apply even if an older
   // inject already set window.__cocosHierarchyBridge__.
 
@@ -822,30 +822,13 @@
       if (points) {
         const { minX, minY, maxX, maxY, spread } = screenSpread(points);
         if (spread > 2) {
-          // CC 3.6+ docs: screen space is left-top origin. Also try bottom-left
-          // if the top-left mapping puts the box far outside the canvas.
-          const topLeft = {
-            left: canvasRect.left + minX * scaleX,
-            top: canvasRect.top + minY * scaleY,
-            width: Math.max((maxX - minX) * scaleX, 2),
-            height: Math.max((maxY - minY) * scaleY, 2),
-          };
-          const bottomLeft = {
+          // Cocos camera.worldToScreen uses bottom-left origin; CSS uses top-left.
+          return {
             left: canvasRect.left + minX * scaleX,
             top: canvasRect.top + (bufferH - maxY) * scaleY,
             width: Math.max((maxX - minX) * scaleX, 2),
             height: Math.max((maxY - minY) * scaleY, 2),
           };
-
-          const fits = (box) =>
-            box.left + box.width > canvasRect.left - 40 &&
-            box.top + box.height > canvasRect.top - 40 &&
-            box.left < canvasRect.right + 40 &&
-            box.top < canvasRect.bottom + 40;
-
-          if (fits(topLeft)) return topLeft;
-          if (fits(bottomLeft)) return bottomLeft;
-          return topLeft;
         }
       }
     }
