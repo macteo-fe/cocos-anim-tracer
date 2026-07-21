@@ -1,5 +1,5 @@
 (function () {
-  const BRIDGE_VERSION = 6;
+  const BRIDGE_VERSION = 8;
   // Always refresh bridge API so extension reloads apply even if an older
   // inject already set window.__cocosHierarchyBridge__.
 
@@ -51,6 +51,7 @@
 
   function serializeNode(node) {
     if (!node) return null;
+    if (node.name === "__AnimTracerHL__") return null;
 
     const components = getComponentNames(node);
     const uuid = node.uuid || String(node._id ?? Math.random());
@@ -93,7 +94,13 @@
   }
 
   function getNodeByUuid(uuid) {
-    return nodeCache.get(uuid) || null;
+    if (!uuid) return null;
+    if (nodeCache.has(uuid)) return nodeCache.get(uuid);
+    const scene = getCocos()?.director?.getScene?.();
+    if (!scene) return null;
+    const node = findNodeByUuid(scene, uuid);
+    if (node) nodeCache.set(uuid, node);
+    return node;
   }
 
   function selectNode(uuid) {
@@ -588,6 +595,371 @@
     return { ok: true, paused: bridgePaused };
   }
 
+  const HIGHLIGHT_STYLE_ID = "__animtracer-highlight-style__";
+  const HIGHLIGHT_EL_ID = "__animtracer-node-highlight__";
+  let highlightRaf = 0;
+  let highlightUuid = null;
+
+  function getGameCanvas() {
+    return (
+      document.getElementById("GameCanvas") ||
+      document.querySelector("canvas#GameCanvas") ||
+      document.querySelector("canvas")
+    );
+  }
+
+  function getUITransform(node) {
+    if (!node) return null;
+    if (node._uiProps?.uiTransformComp) return node._uiProps.uiTransformComp;
+    const comps = node._components || [];
+    return (
+      comps.find((comp) => {
+        const name = comp?.constructor?.name || "";
+        return name === "UITransform" || name === "cc.UITransform" || /UITransform/i.test(name);
+      }) || null
+    );
+  }
+
+  function getNodeWorldRect(node) {
+    const ui = getUITransform(node);
+
+    // Prefer the node's own content size corners in world space (stable AABB).
+    if (ui) {
+      let width = 0;
+      let height = 0;
+      let ax = 0.5;
+      let ay = 0.5;
+      try {
+        width = Number(ui.contentSize?.width ?? ui.width ?? 0) || 0;
+        height = Number(ui.contentSize?.height ?? ui.height ?? 0) || 0;
+        ax = Number(ui.anchorPoint?.x ?? ui.anchorX ?? 0.5);
+        ay = Number(ui.anchorPoint?.y ?? ui.anchorY ?? 0.5);
+      } catch {}
+
+      if ((width > 0 || height > 0) && typeof ui.convertToWorldSpaceAR === "function") {
+        const locals = [
+          [-width * ax, -height * ay],
+          [width * (1 - ax), -height * ay],
+          [-width * ax, height * (1 - ay)],
+          [width * (1 - ax), height * (1 - ay)],
+        ];
+        const worlds = [];
+        for (const [lx, ly] of locals) {
+          try {
+            const out = makeVec3(0, 0, 0);
+            const ret = ui.convertToWorldSpaceAR(makeVec3(lx, ly, 0), out) || out;
+            worlds.push({ x: ret.x, y: ret.y });
+          } catch {
+            worlds.length = 0;
+            break;
+          }
+        }
+        if (worlds.length === 4) {
+          let minX = Infinity;
+          let minY = Infinity;
+          let maxX = -Infinity;
+          let maxY = -Infinity;
+          for (const p of worlds) {
+            minX = Math.min(minX, p.x);
+            maxX = Math.max(maxX, p.x);
+            minY = Math.min(minY, p.y);
+            maxY = Math.max(maxY, p.y);
+          }
+          return {
+            x: minX,
+            y: minY,
+            width: Math.max(maxX - minX, 1),
+            height: Math.max(maxY - minY, 1),
+          };
+        }
+      }
+    }
+
+    if (ui?.getBoundingBoxToWorld) {
+      try {
+        const rect = ui.getBoundingBoxToWorld();
+        const width = Number(rect?.width) || 0;
+        const height = Number(rect?.height) || 0;
+        if (rect && Number.isFinite(rect.x) && Number.isFinite(rect.y) && (width > 1 || height > 1)) {
+          return { x: rect.x, y: rect.y, width, height };
+        }
+      } catch {}
+    }
+
+    let wp = node.worldPosition;
+    try {
+      if (!wp && typeof node.getWorldPosition === "function") {
+        wp = node.getWorldPosition();
+      }
+    } catch {}
+    wp = wp || { x: 0, y: 0 };
+    return {
+      x: wp.x - 20,
+      y: wp.y - 20,
+      width: 40,
+      height: 40,
+    };
+  }
+
+  function findCameraForNode(node) {
+    let curr = node;
+    while (curr) {
+      const comps = curr._components || [];
+      for (const comp of comps) {
+        const name = comp?.constructor?.name || "";
+        if (name === "Canvas" || name === "cc.Canvas") {
+          const camComp = comp.cameraComponent || comp.camera;
+          return camComp?.camera || camComp || comp._camera || null;
+        }
+        if (name === "Camera" || name === "cc.Camera") {
+          return comp.camera || comp;
+        }
+      }
+      curr = curr.parent;
+    }
+
+    const scene = getCocos()?.director?.getScene?.();
+    if (!scene) return null;
+    const stack = [scene];
+    while (stack.length) {
+      const n = stack.pop();
+      const comps = n?._components || [];
+      for (const comp of comps) {
+        const name = comp?.constructor?.name || "";
+        if (name === "Camera" || name === "cc.Camera") {
+          return comp.camera || comp;
+        }
+      }
+      for (const child of n?.children || []) stack.push(child);
+    }
+    return null;
+  }
+
+  function makeVec3(x, y, z = 0) {
+    const cc = getCocos();
+    const Vec3 = cc?.math?.Vec3 || cc?.Vec3;
+    if (typeof Vec3 === "function") {
+      try {
+        return new Vec3(x, y, z);
+      } catch {}
+    }
+    return { x, y, z };
+  }
+
+  function screenSpread(points) {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const p of points) {
+      minX = Math.min(minX, p.x);
+      maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y);
+      maxY = Math.max(maxY, p.y);
+    }
+    return {
+      minX,
+      minY,
+      maxX,
+      maxY,
+      spread: maxX - minX + (maxY - minY),
+    };
+  }
+
+  function projectWorldCorners(camera, rect) {
+    const corners = [
+      [rect.x, rect.y],
+      [rect.x + rect.width, rect.y],
+      [rect.x, rect.y + rect.height],
+      [rect.x + rect.width, rect.y + rect.height],
+    ];
+
+    const tryOrder = (order) => {
+      const points = [];
+      for (const [x, y] of corners) {
+        const world = makeVec3(x, y, 0);
+        const out = makeVec3(0, 0, 0);
+        try {
+          let ret;
+          if (order === "worldFirst") {
+            ret = camera.worldToScreen(world, out);
+          } else {
+            ret = camera.worldToScreen(out, world);
+          }
+          const p = ret && typeof ret.x === "number" ? ret : out;
+          if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return null;
+          points.push({ x: p.x, y: p.y });
+        } catch {
+          return null;
+        }
+      }
+      return points;
+    };
+
+    // Cocos versions disagree on argument order; pick the projection with real size.
+    const a = tryOrder("worldFirst");
+    const b = tryOrder("outFirst");
+    const aInfo = a ? screenSpread(a) : null;
+    const bInfo = b ? screenSpread(b) : null;
+    if (aInfo && bInfo) return aInfo.spread >= bInfo.spread ? a : b;
+    return a || b;
+  }
+
+  function worldRectToCss(rect, node) {
+    const canvas = getGameCanvas();
+    if (!canvas) return null;
+    const canvasRect = canvas.getBoundingClientRect();
+    if (!canvasRect.width || !canvasRect.height) return null;
+
+    const bufferW = canvas.width || canvasRect.width;
+    const bufferH = canvas.height || canvasRect.height;
+    const scaleX = canvasRect.width / bufferW;
+    const scaleY = canvasRect.height / bufferH;
+
+    const camera = findCameraForNode(node);
+    if (camera && typeof camera.worldToScreen === "function") {
+      const points = projectWorldCorners(camera, rect);
+      if (points) {
+        const { minX, minY, maxX, maxY, spread } = screenSpread(points);
+        if (spread > 2) {
+          // CC 3.6+ docs: screen space is left-top origin. Also try bottom-left
+          // if the top-left mapping puts the box far outside the canvas.
+          const topLeft = {
+            left: canvasRect.left + minX * scaleX,
+            top: canvasRect.top + minY * scaleY,
+            width: Math.max((maxX - minX) * scaleX, 2),
+            height: Math.max((maxY - minY) * scaleY, 2),
+          };
+          const bottomLeft = {
+            left: canvasRect.left + minX * scaleX,
+            top: canvasRect.top + (bufferH - maxY) * scaleY,
+            width: Math.max((maxX - minX) * scaleX, 2),
+            height: Math.max((maxY - minY) * scaleY, 2),
+          };
+
+          const fits = (box) =>
+            box.left + box.width > canvasRect.left - 40 &&
+            box.top + box.height > canvasRect.top - 40 &&
+            box.left < canvasRect.right + 40 &&
+            box.top < canvasRect.bottom + 40;
+
+          if (fits(topLeft)) return topLeft;
+          if (fits(bottomLeft)) return bottomLeft;
+          return topLeft;
+        }
+      }
+    }
+
+    // Fallback: map design/visible size to canvas CSS box (common for UI games).
+    const cc = getCocos();
+    const view = cc?.view;
+    const visible = view?.getVisibleSize?.() || { width: canvasRect.width, height: canvasRect.height };
+    const origin = view?.getVisibleOrigin?.() || { x: 0, y: 0 };
+    const sx = canvasRect.width / (visible.width || 1);
+    const sy = canvasRect.height / (visible.height || 1);
+    return {
+      left: canvasRect.left + (rect.x - origin.x) * sx,
+      top: canvasRect.top + (visible.height - (rect.y - origin.y) - rect.height) * sy,
+      width: Math.max(rect.width * sx, 2),
+      height: Math.max(rect.height * sy, 2),
+    };
+  }
+
+  function ensureHighlightEl() {
+    if (!document.getElementById(HIGHLIGHT_STYLE_ID)) {
+      const style = document.createElement("style");
+      style.id = HIGHLIGHT_STYLE_ID;
+      style.textContent = `
+        #${HIGHLIGHT_EL_ID} {
+          position: fixed;
+          pointer-events: none;
+          z-index: 2147483646;
+          border: 2px solid #3794ff;
+          background: rgba(55, 148, 255, 0.18);
+          box-sizing: border-box;
+          border-radius: 2px;
+          display: none;
+        }
+        #${HIGHLIGHT_EL_ID} .animtracer-hl-label {
+          position: absolute;
+          left: 0;
+          top: -18px;
+          max-width: 240px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          font: 11px/16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+          color: #fff;
+          background: #3794ff;
+          padding: 0 5px;
+          white-space: nowrap;
+          border-radius: 2px;
+        }
+      `;
+      document.documentElement.appendChild(style);
+    }
+
+    let el = document.getElementById(HIGHLIGHT_EL_ID);
+    if (!el) {
+      el = document.createElement("div");
+      el.id = HIGHLIGHT_EL_ID;
+      const label = document.createElement("div");
+      label.className = "animtracer-hl-label";
+      el.appendChild(label);
+      document.documentElement.appendChild(el);
+    }
+    return el;
+  }
+
+  function updateHighlightFrame() {
+    if (!highlightUuid) return;
+    const node = getNodeByUuid(highlightUuid);
+    const el = ensureHighlightEl();
+    if (!node || node.isValid === false) {
+      el.style.display = "none";
+      return;
+    }
+
+    const worldRect = getNodeWorldRect(node);
+    const cssRect = worldRectToCss(worldRect, node);
+    if (!cssRect) {
+      el.style.display = "none";
+      return;
+    }
+
+    el.style.display = "block";
+    el.style.left = `${cssRect.left}px`;
+    el.style.top = `${cssRect.top}px`;
+    el.style.width = `${cssRect.width}px`;
+    el.style.height = `${cssRect.height}px`;
+    const label = el.querySelector(".animtracer-hl-label");
+    if (label) label.textContent = node.name || "(unnamed)";
+
+    highlightRaf = requestAnimationFrame(updateHighlightFrame);
+  }
+
+  function highlightNode(uuid) {
+    const id = String(uuid || "").trim();
+    if (!id) return { ok: false, error: "UUID required" };
+    const node = getNodeByUuid(id);
+    if (!node) return { ok: false, error: "Node not found" };
+
+    highlightUuid = id;
+    if (highlightRaf) cancelAnimationFrame(highlightRaf);
+    highlightRaf = requestAnimationFrame(updateHighlightFrame);
+    return { ok: true, name: node.name || "(unnamed)" };
+  }
+
+  function clearNodeHighlight() {
+    highlightUuid = null;
+    if (highlightRaf) {
+      cancelAnimationFrame(highlightRaf);
+      highlightRaf = 0;
+    }
+    const el = document.getElementById(HIGHLIGHT_EL_ID);
+    if (el) el.style.display = "none";
+    return { ok: true };
+  }
+
   function setupPauseKeyboardShortcut() {
     if (window.__animTracerPauseKeyHandler) return;
     window.__animTracerPauseKeyHandler = (e) => {
@@ -663,6 +1035,8 @@
     getGameSpeed,
     togglePauseResume,
     getPauseState,
+    highlightNode,
+    clearNodeHighlight,
     init,
     isReady: () => !!getCocos(),
   };

@@ -39,6 +39,9 @@ let port = null;
 let referenceResults = [];
 let highlightedReferenceNodeUuid = null;
 let spineAnimationNames = [];
+let hoverHighlightTimer = null;
+let clearHighlightTimer = null;
+let hoverHighlightUuid = null;
 const TOOLS_MIN_WIDTH = 260;
 const TOOLS_MAX_WIDTH = 700;
 const THEME_STORAGE_KEY = "animtracer-theme-preference";
@@ -318,6 +321,22 @@ const EVAL_GET_PAUSE_STATE = `(() => {
   return window.__cocosHierarchyBridge__?.getPauseState() ?? { ok: false, paused: false };
 })()`;
 
+const EVAL_HIGHLIGHT_NODE = (uuid) => `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.highlightNode !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page" };
+  }
+  return bridge.highlightNode(${JSON.stringify(uuid)});
+})()`;
+
+const EVAL_CLEAR_HIGHLIGHT = `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.clearNodeHighlight !== "function") {
+    return { ok: false };
+  }
+  return bridge.clearNodeHighlight();
+})()`;
+
 function evalInPage(expression, callback) {
   chrome.devtools.inspectedWindow.eval(expression, (result, exceptionInfo) => {
     if (exceptionInfo?.isException) {
@@ -434,6 +453,43 @@ function initToolsPanelResizer() {
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
   });
+}
+
+function highlightNodeInGame(uuid) {
+  const id = String(uuid || "").trim();
+  if (!id) return;
+  if (clearHighlightTimer) {
+    clearTimeout(clearHighlightTimer);
+    clearHighlightTimer = null;
+  }
+  if (hoverHighlightUuid === id) return;
+  hoverHighlightUuid = id;
+  evalInPage(EVAL_HIGHLIGHT_NODE(id), () => {});
+}
+
+function clearNodeHighlightInGame() {
+  if (hoverHighlightTimer) {
+    clearTimeout(hoverHighlightTimer);
+    hoverHighlightTimer = null;
+  }
+  if (clearHighlightTimer) clearTimeout(clearHighlightTimer);
+  clearHighlightTimer = setTimeout(() => {
+    clearHighlightTimer = null;
+    hoverHighlightUuid = null;
+    evalInPage(EVAL_CLEAR_HIGHLIGHT, () => {});
+  }, 40);
+}
+
+function scheduleNodeHighlight(uuid) {
+  if (clearHighlightTimer) {
+    clearTimeout(clearHighlightTimer);
+    clearHighlightTimer = null;
+  }
+  if (hoverHighlightTimer) clearTimeout(hoverHighlightTimer);
+  hoverHighlightTimer = setTimeout(() => {
+    hoverHighlightTimer = null;
+    highlightNodeInGame(uuid);
+  }, 20);
 }
 
 function setReferenceResults(items) {
@@ -793,6 +849,8 @@ function renderNode(node, depth, container) {
   }
 
   row.addEventListener("click", () => selectNode(node));
+  row.addEventListener("mouseenter", () => scheduleNodeHighlight(node.uuid));
+  row.addEventListener("mouseleave", () => clearNodeHighlightInGame());
 
   nodeEl.appendChild(row);
 
