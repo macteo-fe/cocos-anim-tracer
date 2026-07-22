@@ -51,7 +51,12 @@ let nodeProperties = [];
 let nodePropertiesStatus = "idle"; // idle | loading | ready | error
 let nodePropertiesError = "";
 let componentPropListHeight = null;
-let componentPropListObserver = null;
+let componentPropListResizing = false;
+let componentPropListScrollTop = 0;
+let nodePropListScrollTop = 0;
+let detailRenderTimer = null;
+let detailPointerActive = false;
+let detailRefreshPending = false;
 const TOOLS_MIN_WIDTH = 260;
 const TOOLS_MAX_WIDTH = 700;
 const THEME_STORAGE_KEY = "animtracer-theme-preference";
@@ -1131,6 +1136,87 @@ function isEditingComponentProperty() {
   return !!(active && detailEl.contains(active) && active.classList.contains("prop-value"));
 }
 
+function isDetailInteractionLocked() {
+  return isEditingComponentProperty() || detailPointerActive || componentPropListResizing;
+}
+
+function releaseDetailPointerLock() {
+  detailPointerActive = false;
+  if (componentPropListResizing) {
+    persistComponentPropListHeight();
+  }
+  // Wait a tick so click-to-focus on inputs can settle before we decide.
+  setTimeout(flushDetailRefreshIfIdle, 0);
+}
+
+function flushDetailRefreshIfIdle() {
+  if (!detailRefreshPending) return;
+  if (isDetailInteractionLocked()) return;
+  detailRefreshPending = false;
+  const node = hierarchy?.tree && selectedUuid ? findNode(hierarchy.tree, selectedUuid) : null;
+  if (node) scheduleRenderDetail(node);
+}
+
+function markDetailPointerActive() {
+  detailPointerActive = true;
+}
+
+function requestDetailRender(node, options = {}) {
+  const { immediate = false, silent = false } = options;
+  if (!node) return;
+  if (silent && isDetailInteractionLocked()) {
+    detailRefreshPending = true;
+    return;
+  }
+  scheduleRenderDetail(node, { immediate });
+}
+
+function capturePropListScroll() {
+  const componentList = document.getElementById("component-prop-list");
+  if (componentList) componentPropListScrollTop = componentList.scrollTop;
+  const nodeList = document.getElementById("node-prop-list");
+  if (nodeList) nodePropListScrollTop = nodeList.scrollTop;
+}
+
+function restorePropListScroll() {
+  const restore = () => {
+    const componentList = document.getElementById("component-prop-list");
+    if (componentList) componentList.scrollTop = componentPropListScrollTop;
+    const nodeList = document.getElementById("node-prop-list");
+    if (nodeList) nodeList.scrollTop = nodePropListScrollTop;
+  };
+  restore();
+  requestAnimationFrame(restore);
+}
+
+function scheduleRenderDetail(node, options = {}) {
+  const { immediate = false } = options;
+  if (!node) return;
+  if (immediate) {
+    if (detailRenderTimer) {
+      clearTimeout(detailRenderTimer);
+      detailRenderTimer = null;
+    }
+    if (isDetailInteractionLocked()) {
+      detailRefreshPending = true;
+      return;
+    }
+    renderDetail(node);
+    return;
+  }
+  if (detailRenderTimer) clearTimeout(detailRenderTimer);
+  detailRenderTimer = setTimeout(() => {
+    detailRenderTimer = null;
+    if (isDetailInteractionLocked()) {
+      detailRefreshPending = true;
+      return;
+    }
+    if (!selectedUuid || node.uuid !== selectedUuid) return;
+    const current = hierarchy?.tree ? findNode(hierarchy.tree, selectedUuid) : node;
+    if (current) renderDetail(current);
+  }, 50);
+}
+
 function formatScalarPropValue(prop) {
   if (prop.type === "boolean") return prop.value ? "true" : "false";
   if (prop.type === "number") return String(prop.value);
@@ -1222,7 +1308,7 @@ function renderNodePropertiesHtml() {
   return `
     <div class="component-props">
       <h2>Node properties</h2>
-      <div class="prop-list">${renderPropRowsHtml(nodeProperties, "node")}</div>
+      <div class="prop-list" id="node-prop-list">${renderPropRowsHtml(nodeProperties, "node")}</div>
     </div>
   `;
 }
@@ -1349,6 +1435,9 @@ function bindPropertyEditors(node) {
           }
         });
       }
+      input.addEventListener("blur", () => {
+        setTimeout(flushDetailRefreshIfIdle, 0);
+      });
     });
   });
 }
@@ -1368,37 +1457,34 @@ function loadNodeProperties(uuid, options = {}) {
         nodePropertiesError = result?.error || err || "Failed to load node properties.";
       }
       if (!silent) setToolStatus(result?.error || err || "Failed to load node properties.", "error");
-      if (!isEditingComponentProperty()) {
-        const node = hierarchy?.tree ? findNode(hierarchy.tree, uuid) : null;
-        if (node) renderDetail(node);
-      }
+      const node = hierarchy?.tree ? findNode(hierarchy.tree, uuid) : null;
+      if (node) requestDetailRender(node, { immediate: !silent, silent });
       return;
     }
     nodeProperties = result.properties || [];
     nodePropertiesStatus = "ready";
     nodePropertiesError = "";
-    if (!isEditingComponentProperty()) {
-      const node = hierarchy?.tree ? findNode(hierarchy.tree, uuid) : null;
-      if (node) renderDetail(node);
-    }
+    const node = hierarchy?.tree ? findNode(hierarchy.tree, uuid) : null;
+    if (node) requestDetailRender(node, { immediate: !silent, silent });
   });
 }
 
 function loadComponentProperties(uuid, componentIndex, options = {}) {
   const { silent = false } = options;
   evalInPage(EVAL_GET_COMPONENT_PROPS(uuid, componentIndex), (result, err) => {
+    if (selectedUuid !== uuid || selectedComponentIndex !== componentIndex) return;
     if (err || !result?.ok) {
       componentProperties = [];
       componentPropertiesName = "";
       if (!silent) setToolStatus(result?.error || err || "Failed to load properties.", "error");
-      const node = hierarchy?.tree && selectedUuid ? findNode(hierarchy.tree, selectedUuid) : null;
-      if (node && !isEditingComponentProperty()) renderDetail(node);
+      const node = hierarchy?.tree ? findNode(hierarchy.tree, uuid) : null;
+      if (node) requestDetailRender(node, { immediate: !silent, silent });
       return;
     }
     componentProperties = result.properties || [];
     componentPropertiesName = result.componentName || "Component";
-    const node = hierarchy?.tree && selectedUuid ? findNode(hierarchy.tree, selectedUuid) : null;
-    if (node && !isEditingComponentProperty()) renderDetail(node);
+    const node = hierarchy?.tree ? findNode(hierarchy.tree, uuid) : null;
+    if (node) requestDetailRender(node, { immediate: !silent, silent });
   });
 }
 
@@ -1414,6 +1500,8 @@ function renderDetail(node) {
     nodePropertiesError = "";
     return;
   }
+
+  capturePropListScroll();
 
   detailEl.className = "detail";
   const comps = node.components
@@ -1458,7 +1546,8 @@ function renderDetail(node) {
       selectedComponentIndex = index;
       componentProperties = [];
       componentPropertiesName = node.components[index] || "Component";
-      renderDetail(node);
+      componentPropListScrollTop = 0;
+      scheduleRenderDetail(node, { immediate: true });
       evalInPage(EVAL_SELECT_COMPONENT(node.uuid, index), (ok) => {
         if (ok) {
           setToolStatus(`Selected component set to $c (${node.components[index] || "Component"})`, "ok");
@@ -1472,22 +1561,51 @@ function renderDetail(node) {
 
   bindPropertyEditors(node);
   bindComponentPropListResize();
+  bindNodePropListScroll();
+  restorePropListScroll();
 }
 
 function bindComponentPropListResize() {
   const list = document.getElementById("component-prop-list");
-  if (componentPropListObserver) {
-    componentPropListObserver.disconnect();
-    componentPropListObserver = null;
+  if (!list) return;
+
+  // Restore user size without involving ResizeObserver (contentRect + border-box
+  // caused the box to shrink on every auto-refresh re-render).
+  if (componentPropListHeight) {
+    list.style.height = `${componentPropListHeight}px`;
   }
-  if (!list || typeof ResizeObserver !== "function") return;
-  componentPropListObserver = new ResizeObserver((entries) => {
-    const entry = entries[0];
-    if (!entry) return;
-    const height = Math.round(entry.contentRect.height);
-    if (height > 0) componentPropListHeight = height;
+
+  list.addEventListener("pointerdown", () => {
+    componentPropListResizing = true;
+    markDetailPointerActive();
   });
-  componentPropListObserver.observe(list);
+  list.addEventListener("scroll", () => {
+    componentPropListScrollTop = list.scrollTop;
+  }, { passive: true });
+}
+
+function bindNodePropListScroll() {
+  const list = document.getElementById("node-prop-list");
+  if (!list) return;
+  list.addEventListener("pointerdown", markDetailPointerActive);
+  list.addEventListener("scroll", () => {
+    nodePropListScrollTop = list.scrollTop;
+  }, { passive: true });
+}
+
+function persistComponentPropListHeight() {
+  if (!componentPropListResizing) return;
+  componentPropListResizing = false;
+  const list = document.getElementById("component-prop-list");
+  if (!list) return;
+  const height = Math.round(list.offsetHeight);
+  if (height > 0) componentPropListHeight = height;
+}
+
+if (!window.__animTracerPropListResizeBound) {
+  window.__animTracerPropListResizeBound = true;
+  window.addEventListener("pointerup", releaseDetailPointerLock);
+  window.addEventListener("pointercancel", releaseDetailPointerLock);
 }
 
 function escapeHtml(str) {
@@ -1522,13 +1640,15 @@ function refresh() {
       const node = findNode(hierarchy.tree, selectedUuid);
       if (node) {
         updateSpineTraceToolVisibility(node);
-        if (isEditingComponentProperty()) {
-          // Keep editors intact while typing.
+        if (isDetailInteractionLocked()) {
+          detailRefreshPending = true;
         } else {
-          renderDetail(node);
+          // Avoid wiping scroll / scrollbar drag with an immediate full rebuild.
           loadNodeProperties(node.uuid, { silent: true });
           if (selectedComponentIndex != null) {
             loadComponentProperties(node.uuid, selectedComponentIndex, { silent: true });
+          } else {
+            requestDetailRender(node, { silent: true });
           }
         }
       } else {
