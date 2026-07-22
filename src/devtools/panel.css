@@ -301,6 +301,54 @@ body.resizing {
   overflow: auto;
   padding: 8px;
   background: var(--bg2);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.detail-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+
+.detail-panel-header h2 {
+  margin: 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+.tools-toggle {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg3);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.tools-toggle:hover,
+.tools-toggle.active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.tools-panel {
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.tools-panel[hidden] {
+  display: none;
 }
 
 .tool-box {
@@ -683,6 +731,115 @@ body.resizing {
 .detail .component.spine {
   background: var(--spine-bg);
   color: var(--spine);
+}
+
+.detail .component.selected {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.component-props {
+  margin-top: 10px;
+}
+
+.component-props > h2 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+.component-props.empty {
+  margin-top: 8px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.prop-list {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  max-height: 220px;
+  overflow: auto;
+}
+
+.prop-row {
+  display: grid;
+  grid-template-columns: 1fr minmax(90px, 1.2fr);
+  gap: 8px;
+  align-items: center;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.prop-row:last-child {
+  border-bottom: 0;
+}
+
+.prop-row label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.prop-row .prop-value {
+  width: 100%;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg2);
+  color: var(--text);
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.prop-row .prop-value[type="checkbox"] {
+  width: auto;
+  justify-self: start;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.prop-row .prop-value:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.prop-row-vector {
+  align-items: start;
+}
+
+.prop-vec {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(56px, 1fr));
+  gap: 4px;
+  width: 100%;
+}
+
+.prop-vec-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.prop-vec-field span {
+  color: var(--text-dim);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.prop-vec-field .prop-value {
+  width: 100%;
 }
 
 .detail-actions {

@@ -1,5 +1,5 @@
 (function () {
-  const BRIDGE_VERSION = 9;
+  const BRIDGE_VERSION = 11;
   // Always refresh bridge API so extension reloads apply even if an older
   // inject already set window.__cocosHierarchyBridge__.
 
@@ -120,6 +120,465 @@
     if (!comp) return false;
     window.$c = comp;
     return true;
+  }
+
+  const EDITABLE_SKIP_KEYS = new Set([
+    "constructor",
+    "prototype",
+    "uuid",
+    "node",
+    "_id",
+    "_objFlags",
+    "_name",
+    "_enabled",
+    "_isOnLoadCalled",
+    "enabledInHierarchy",
+    "isValid",
+    "worldPosition",
+    "worldScale",
+    "worldRotation",
+    "worldMatrix",
+    "matrix",
+    "forward",
+    "up",
+    "right",
+    "__scriptAsset",
+    "__prefab",
+  ]);
+
+  function getComponentDisplayName(comp) {
+    const ctorName = comp?.constructor?.name || "";
+    try {
+      const className = getCocos()?.js?.getClassName?.(comp);
+      if (className) return className;
+    } catch {}
+    return ctorName || "Component";
+  }
+
+  function collectEditablePropKeys(target) {
+    const keys = new Set();
+    try {
+      Object.keys(target).forEach((key) => keys.add(key));
+    } catch {}
+    try {
+      Object.getOwnPropertyNames(target).forEach((key) => keys.add(key));
+    } catch {}
+    try {
+      const declared = target.constructor?.__values__ || target.constructor?.__props__;
+      if (Array.isArray(declared)) declared.forEach((key) => keys.add(key));
+    } catch {}
+    return keys;
+  }
+
+  function readTargetProp(target, key) {
+    try {
+      if (Object.prototype.hasOwnProperty.call(target, key)) {
+        const desc = Object.getOwnPropertyDescriptor(target, key);
+        if (desc && "value" in desc) return { ok: true, value: desc.value, rawKey: key };
+      }
+      const privateKey = key[0] === "_" ? null : `_${key}`;
+      if (privateKey && Object.prototype.hasOwnProperty.call(target, privateKey)) {
+        return { ok: true, value: target[privateKey], rawKey: privateKey };
+      }
+      const value = target[key];
+      return { ok: true, value, rawKey: key };
+    } catch {
+      return { ok: false };
+    }
+  }
+
+  function normalizePropKey(key) {
+    return key[0] === "_" ? key.slice(1) : key;
+  }
+
+  function ctorName(value) {
+    try {
+      return value?.constructor?.name || "";
+    } catch {
+      return "";
+    }
+  }
+
+  function pickNumericFields(value, fields) {
+    const out = {};
+    for (const field of fields) {
+      const n = Number(value?.[field]);
+      out[field] = Number.isFinite(n) ? n : 0;
+    }
+    return out;
+  }
+
+  function describeEditableValue(value) {
+    if (value == null) return null;
+    const type = typeof value;
+    if (type === "string" || type === "boolean") return { type, value };
+    if (type === "number") {
+      return Number.isFinite(value) ? { type: "number", value } : null;
+    }
+    if (type !== "object") return null;
+
+    const name = ctorName(value);
+    if (name === "Vec2" || name === "math.Vec2") {
+      return { type: "vec2", fields: ["x", "y"], value: pickNumericFields(value, ["x", "y"]) };
+    }
+    if (name === "Vec3" || name === "math.Vec3") {
+      return { type: "vec3", fields: ["x", "y", "z"], value: pickNumericFields(value, ["x", "y", "z"]) };
+    }
+    if (name === "Vec4" || name === "math.Vec4" || name === "Quat" || name === "math.Quat") {
+      const fields = name.includes("Quat") || "w" in value ? ["x", "y", "z", "w"] : ["x", "y", "z", "w"];
+      return { type: name.includes("Quat") ? "quat" : "vec4", fields, value: pickNumericFields(value, fields) };
+    }
+    if (name === "Size" || name === "math.Size") {
+      return {
+        type: "size",
+        fields: ["width", "height"],
+        value: pickNumericFields(value, ["width", "height"]),
+      };
+    }
+    if (name === "Rect" || name === "math.Rect") {
+      return {
+        type: "rect",
+        fields: ["x", "y", "width", "height"],
+        value: pickNumericFields(value, ["x", "y", "width", "height"]),
+      };
+    }
+    if (name === "Color" || name === "math.Color") {
+      return {
+        type: "color",
+        fields: ["r", "g", "b", "a"],
+        value: pickNumericFields(value, ["r", "g", "b", "a"]),
+      };
+    }
+
+    // Duck-typing for plain / engine objects.
+    if ("width" in value && "height" in value) {
+      if ("x" in value && "y" in value) {
+        return {
+          type: "rect",
+          fields: ["x", "y", "width", "height"],
+          value: pickNumericFields(value, ["x", "y", "width", "height"]),
+        };
+      }
+      return {
+        type: "size",
+        fields: ["width", "height"],
+        value: pickNumericFields(value, ["width", "height"]),
+      };
+    }
+    if ("x" in value && "y" in value && "z" in value && "w" in value) {
+      return { type: "vec4", fields: ["x", "y", "z", "w"], value: pickNumericFields(value, ["x", "y", "z", "w"]) };
+    }
+    if ("x" in value && "y" in value && "z" in value) {
+      return { type: "vec3", fields: ["x", "y", "z"], value: pickNumericFields(value, ["x", "y", "z"]) };
+    }
+    if ("x" in value && "y" in value) {
+      return { type: "vec2", fields: ["x", "y"], value: pickNumericFields(value, ["x", "y"]) };
+    }
+    return null;
+  }
+
+  function writeStructuredValue(targetValue, nextValue, fields) {
+    if (!targetValue || typeof targetValue !== "object") return false;
+    let wrote = false;
+    for (const field of fields) {
+      if (!(field in nextValue)) continue;
+      const n = Number(nextValue[field]);
+      if (!Number.isFinite(n)) continue;
+      try {
+        targetValue[field] = n;
+        wrote = true;
+      } catch {}
+    }
+    return wrote;
+  }
+
+  function assignPropValue(target, key, rawKey, nextValue, describedType, fields) {
+    let wrote = false;
+    const current = readTargetProp(target, key).value ?? readTargetProp(target, rawKey).value;
+
+    if (fields?.length && current && typeof current === "object") {
+      wrote = writeStructuredValue(current, nextValue, fields) || wrote;
+      // Re-assign to trigger Cocos setters/dirty flags.
+      try {
+        target[key] = current;
+        wrote = true;
+      } catch {}
+      try {
+        if (rawKey && rawKey !== key) {
+          target[rawKey] = current;
+          wrote = true;
+        }
+      } catch {}
+      return wrote;
+    }
+
+    try {
+      target[key] = nextValue;
+      wrote = true;
+    } catch {}
+    try {
+      const privateKey = `_${key}`;
+      if (Object.prototype.hasOwnProperty.call(target, privateKey)) {
+        target[privateKey] = nextValue;
+        wrote = true;
+      }
+    } catch {}
+    try {
+      if (rawKey && rawKey !== key) {
+        target[rawKey] = nextValue;
+        wrote = true;
+      }
+    } catch {}
+    return wrote;
+  }
+
+  function collectPropertiesFromTarget(target, extraKeys = []) {
+    const byName = new Map();
+    const keys = new Set([...collectEditablePropKeys(target), ...extraKeys]);
+    for (const key of keys) {
+      if (!key || key.startsWith("__")) continue;
+      const displayKey = normalizePropKey(key);
+      if (!displayKey || EDITABLE_SKIP_KEYS.has(key) || EDITABLE_SKIP_KEYS.has(displayKey)) continue;
+      if (displayKey === "node") continue;
+
+      const read = readTargetProp(target, key);
+      if (!read.ok) continue;
+      const described = describeEditableValue(read.value);
+      if (!described) continue;
+
+      const existing = byName.get(displayKey);
+      if (existing && existing.rawKey[0] !== "_" && key[0] === "_") continue;
+      byName.set(displayKey, {
+        key: displayKey,
+        rawKey: read.rawKey || key,
+        type: described.type,
+        fields: described.fields || null,
+        value: described.value,
+      });
+    }
+    return Array.from(byName.values()).sort((a, b) => a.key.localeCompare(b.key));
+  }
+
+  function getComponentProperties(uuid, componentIndex) {
+    const node = getNodeByUuid(uuid);
+    if (!node) return { ok: false, error: "Node not found", properties: [] };
+    const index = Number(componentIndex);
+    if (!Number.isFinite(index) || index < 0) {
+      return { ok: false, error: "Invalid component index", properties: [] };
+    }
+    const comp = node._components?.[index];
+    if (!comp) return { ok: false, error: "Component not found", properties: [] };
+
+    return {
+      ok: true,
+      componentName: getComponentDisplayName(comp),
+      componentIndex: index,
+      properties: collectPropertiesFromTarget(comp),
+    };
+  }
+
+  function coerceIncomingValue(described, value) {
+    if (!described) return { ok: false, error: "Unsupported property" };
+    if (described.type === "number") {
+      const nextValue = Number(value);
+      if (!Number.isFinite(nextValue)) return { ok: false, error: "Invalid number" };
+      return { ok: true, value: nextValue };
+    }
+    if (described.type === "boolean") {
+      return {
+        ok: true,
+        value: value === true || value === "true" || value === 1 || value === "1",
+      };
+    }
+    if (described.type === "string") {
+      return { ok: true, value: value == null ? "" : String(value) };
+    }
+    if (described.fields?.length) {
+      if (!value || typeof value !== "object") return { ok: false, error: "Expected vector/size object" };
+      return { ok: true, value: pickNumericFields(value, described.fields) };
+    }
+    return { ok: false, error: `Unsupported type: ${described.type}` };
+  }
+
+  function setComponentProperty(uuid, componentIndex, key, value) {
+    const node = getNodeByUuid(uuid);
+    if (!node) return { ok: false, error: "Node not found" };
+    const index = Number(componentIndex);
+    const comp = node._components?.[index];
+    if (!comp) return { ok: false, error: "Component not found" };
+
+    const propKey = String(key || "").trim();
+    if (!propKey) return { ok: false, error: "Property key required" };
+
+    const currentRead =
+      readTargetProp(comp, propKey).ok
+        ? readTargetProp(comp, propKey)
+        : readTargetProp(comp, `_${propKey}`);
+    if (!currentRead?.ok) return { ok: false, error: `Property not found: ${propKey}` };
+
+    const described = describeEditableValue(currentRead.value);
+    const coerced = coerceIncomingValue(described, value);
+    if (!coerced.ok) return coerced;
+
+    const wrote = assignPropValue(
+      comp,
+      propKey,
+      currentRead.rawKey,
+      coerced.value,
+      described.type,
+      described.fields
+    );
+    if (!wrote) return { ok: false, error: "Failed to write property" };
+
+    const verify = describeEditableValue(readTargetProp(comp, propKey).value);
+    return {
+      ok: true,
+      key: propKey,
+      type: described.type,
+      fields: described.fields || null,
+      value: verify ? verify.value : coerced.value,
+    };
+  }
+
+  function readNodeVec3(node, key, fallback = { x: 0, y: 0, z: 0 }) {
+    try {
+      const value = node[key];
+      if (value && typeof value === "object") {
+        return pickNumericFields(value, ["x", "y", "z"]);
+      }
+    } catch {}
+    return { ...fallback };
+  }
+
+  function getNodeProperties(uuid) {
+    try {
+      const node = getNodeByUuid(uuid);
+      if (!node) return { ok: false, error: "Node not found", properties: [] };
+
+      const properties = [];
+      const push = (key, rawValue, rawKey = key) => {
+        const described = describeEditableValue(rawValue);
+        if (!described) return;
+        properties.push({
+          key,
+          rawKey,
+          type: described.type,
+          fields: described.fields || null,
+          value: described.value,
+        });
+      };
+
+      try {
+        push("name", String(node.name ?? ""));
+      } catch {}
+      try {
+        push("active", !!node.active);
+      } catch {}
+
+      try {
+        if (node.position) push("position", node.position);
+        else if (typeof node.getPosition === "function") {
+          const p = node.getPosition();
+          push("position", p || readNodeVec3(node, "position"));
+        } else {
+          push("position", { x: node.x ?? 0, y: node.y ?? 0, z: node.z ?? 0 });
+        }
+      } catch {
+        push("position", { x: 0, y: 0, z: 0 });
+      }
+
+      try {
+        if (node.scale) push("scale", node.scale);
+        else if (typeof node.getScale === "function") push("scale", node.getScale());
+        else push("scale", { x: 1, y: 1, z: 1 });
+      } catch {
+        push("scale", { x: 1, y: 1, z: 1 });
+      }
+
+      try {
+        if (node.eulerAngles) push("eulerAngles", node.eulerAngles);
+      } catch {}
+
+      try {
+        if (typeof node.angle === "number") push("angle", node.angle);
+      } catch {}
+
+      try {
+        if (typeof node.layer === "number") push("layer", node.layer);
+      } catch {}
+
+      return { ok: true, properties };
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err), properties: [] };
+    }
+  }
+
+  function setNodeProperty(uuid, key, value) {
+    const node = getNodeByUuid(uuid);
+    if (!node) return { ok: false, error: "Node not found" };
+    const propKey = String(key || "").trim();
+    if (!propKey) return { ok: false, error: "Property key required" };
+
+    try {
+      if (propKey === "name") {
+        node.name = String(value ?? "");
+        return { ok: true, key: propKey, type: "string", value: node.name };
+      }
+      if (propKey === "active") {
+        node.active = value === true || value === "true" || value === 1 || value === "1";
+        return { ok: true, key: propKey, type: "boolean", value: !!node.active };
+      }
+      if (propKey === "layer") {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return { ok: false, error: "Invalid number" };
+        node.layer = n;
+        return { ok: true, key: propKey, type: "number", value: node.layer };
+      }
+      if (propKey === "angle") {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return { ok: false, error: "Invalid number" };
+        node.angle = n;
+        return { ok: true, key: propKey, type: "number", value: node.angle };
+      }
+      if (propKey === "position" || propKey === "scale" || propKey === "eulerAngles") {
+        const fields = ["x", "y", "z"];
+        const next = pickNumericFields(value || {}, fields);
+        if (propKey === "position") {
+          if (typeof node.setPosition === "function") node.setPosition(next.x, next.y, next.z);
+          else if (node.position) writeStructuredValue(node.position, next, fields);
+          else {
+            node.x = next.x;
+            node.y = next.y;
+            node.z = next.z;
+          }
+        } else if (propKey === "scale") {
+          if (typeof node.setScale === "function") node.setScale(next.x, next.y, next.z);
+          else if (node.scale) writeStructuredValue(node.scale, next, fields);
+        } else if (propKey === "eulerAngles") {
+          if (typeof node.setRotationFromEuler === "function") {
+            node.setRotationFromEuler(next.x, next.y, next.z);
+          } else if (node.eulerAngles) {
+            writeStructuredValue(node.eulerAngles, next, fields);
+            try {
+              node.eulerAngles = node.eulerAngles;
+            } catch {}
+          }
+        }
+        const latest = getNodeProperties(uuid);
+        const prop = latest.properties?.find((item) => item.key === propKey);
+        return {
+          ok: true,
+          key: propKey,
+          type: "vec3",
+          fields,
+          value: prop?.value || next,
+        };
+      }
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) };
+    }
+
+    return { ok: false, error: `Unsupported node property: ${propKey}` };
   }
 
   function toggleActive(uuid) {
@@ -1008,6 +1467,10 @@
     getHierarchy,
     selectNode,
     selectComponent,
+    getComponentProperties,
+    setComponentProperty,
+    getNodeProperties,
+    setNodeProperty,
     toggleActive,
     setActive,
     findNodeReferences,

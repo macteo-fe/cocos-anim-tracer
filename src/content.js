@@ -1,7 +1,7 @@
 (function () {
   function injectScript() {
     const script = document.createElement("script");
-    script.src = `${chrome.runtime.getURL("src/inject.js")}?v=${chrome.runtime.getManifest().version}&b=9`;
+    script.src = `${chrome.runtime.getURL("src/inject.js")}?v=${chrome.runtime.getManifest().version}&b=11`;
     script.onload = () => script.remove();
     (document.head || document.documentElement).appendChild(script);
   }

@@ -44,49 +44,62 @@
         aria-label="Resize tools panel"
       ></div>
       <section class="detail-panel">
-        <h2>Tools</h2>
-        <div class="tool-box">
-          <label for="game-speed-range">Game speed</label>
-          <div class="tool-row speed-row">
-            <input id="game-speed-range" type="range" min="0.1" max="10" step="0.1" value="1" />
-            <input id="game-speed-input" type="number" min="0.1" max="10" step="0.1" value="1" />
-            <span class="speed-unit">x</span>
-          </div>
-          <div class="speed-snaps">
-            <button type="button" class="speed-snap" data-speed="0.1">0.1x</button>
-            <button type="button" class="speed-snap" data-speed="1">1x</button>
-            <button type="button" class="speed-snap" data-speed="10">10x</button>
-          </div>
-          <button id="btn-pause-resume" type="button" class="pause-btn">Pause</button>
+        <div class="detail-panel-header">
+          <h2>Node Details</h2>
+          <button
+            id="btn-toggle-tools"
+            type="button"
+            class="tools-toggle"
+            aria-expanded="false"
+            aria-controls="tools-panel"
+            title="Show tools"
+          >
+            Tools
+          </button>
         </div>
-        <div class="tool-box">
-          <label for="ref-uuid-input">Find node references</label>
-          <div class="tool-row">
-            <input id="ref-uuid-input" type="text" placeholder="Node UUID (empty = selected node)" />
-            <button id="btn-find-refs" type="button">Find</button>
+        <div id="tools-panel" class="tools-panel" hidden>
+          <div class="tool-box">
+            <label for="game-speed-range">Game speed</label>
+            <div class="tool-row speed-row">
+              <input id="game-speed-range" type="range" min="0.1" max="10" step="0.1" value="1" />
+              <input id="game-speed-input" type="number" min="0.1" max="10" step="0.1" value="1" />
+              <span class="speed-unit">x</span>
+            </div>
+            <div class="speed-snaps">
+              <button type="button" class="speed-snap" data-speed="0.1">0.1x</button>
+              <button type="button" class="speed-snap" data-speed="1">1x</button>
+              <button type="button" class="speed-snap" data-speed="10">10x</button>
+            </div>
+            <button id="btn-pause-resume" type="button" class="pause-btn">Pause</button>
           </div>
-        </div>
-        <div id="spine-trace-tool" class="tool-box" hidden>
-          <label for="spine-animation-input">Trace Spine animation</label>
-          <div class="tool-row">
-            <input
-              id="spine-animation-input"
-              type="text"
-              placeholder="Animation name"
-              list="spine-animation-suggestions"
-            />
-            <datalist id="spine-animation-suggestions"></datalist>
-            <button id="btn-trace-spine" type="button">Trace</button>
-            <button id="btn-clear-spine-trace" type="button">Clear</button>
+          <div class="tool-box">
+            <label for="ref-uuid-input">Find node references</label>
+            <div class="tool-row">
+              <input id="ref-uuid-input" type="text" placeholder="Node UUID (empty = selected node)" />
+              <button id="btn-find-refs" type="button">Find</button>
+            </div>
           </div>
-          <div id="spine-animation-suggestion-list" class="suggestion-list" hidden></div>
+          <div id="spine-trace-tool" class="tool-box" hidden>
+            <label for="spine-animation-input">Trace Spine animation</label>
+            <div class="tool-row">
+              <input
+                id="spine-animation-input"
+                type="text"
+                placeholder="Animation name"
+                list="spine-animation-suggestions"
+              />
+              <datalist id="spine-animation-suggestions"></datalist>
+              <button id="btn-trace-spine" type="button">Trace</button>
+              <button id="btn-clear-spine-trace" type="button">Clear</button>
+            </div>
+            <div id="spine-animation-suggestion-list" class="suggestion-list" hidden></div>
+          </div>
+          <div class="tool-box">
+            <label>Reference results</label>
+            <div id="reference-results" class="reference-results empty">No results yet.</div>
+          </div>
+          <div id="tool-status" class="tool-status">Actions log to page console.</div>
         </div>
-        <div class="tool-box">
-          <label>Reference results</label>
-          <div id="reference-results" class="reference-results empty">No results yet.</div>
-        </div>
-        <div id="tool-status" class="tool-status">Actions log to page console.</div>
-        <h2>Node Details</h2>
         <div id="detail" class="detail empty">Select a node</div>
       </section>
     </main>

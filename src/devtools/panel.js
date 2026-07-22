@@ -23,6 +23,8 @@ const gameSpeedRangeEl = document.getElementById("game-speed-range");
 const gameSpeedInputEl = document.getElementById("game-speed-input");
 const pauseResumeBtnEl = document.getElementById("btn-pause-resume");
 const themeToggleBtnEl = document.getElementById("btn-theme-toggle");
+const toolsToggleBtnEl = document.getElementById("btn-toggle-tools");
+const toolsPanelEl = document.getElementById("tools-panel");
 const autoRefreshEl = document.getElementById("auto-refresh");
 const refreshBtn = document.getElementById("btn-refresh");
 
@@ -42,9 +44,16 @@ let spineAnimationNames = [];
 let hoverHighlightTimer = null;
 let clearHighlightTimer = null;
 let hoverHighlightUuid = null;
+let selectedComponentIndex = null;
+let componentProperties = [];
+let componentPropertiesName = "";
+let nodeProperties = [];
+let nodePropertiesStatus = "idle"; // idle | loading | ready | error
+let nodePropertiesError = "";
 const TOOLS_MIN_WIDTH = 260;
 const TOOLS_MAX_WIDTH = 700;
 const THEME_STORAGE_KEY = "animtracer-theme-preference";
+const TOOLS_PANEL_STORAGE_KEY = "animtracer-tools-panel-open";
 
 let themePreference = "auto";
 
@@ -120,6 +129,190 @@ const EVAL_SELECT_COMPONENT = (uuid, componentIndex) => `(() => {
     ${JSON.stringify(uuid)},
     ${JSON.stringify(componentIndex)}
   ) ?? false;
+})()`;
+
+const EVAL_GET_COMPONENT_PROPS = (uuid, componentIndex) => `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.getComponentProperties !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page", properties: [] };
+  }
+  return bridge.getComponentProperties(
+    ${JSON.stringify(uuid)},
+    ${JSON.stringify(componentIndex)}
+  );
+})()`;
+
+const EVAL_SET_COMPONENT_PROP = (uuid, componentIndex, key, value) => `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.setComponentProperty !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page" };
+  }
+  return bridge.setComponentProperty(
+    ${JSON.stringify(uuid)},
+    ${JSON.stringify(componentIndex)},
+    ${JSON.stringify(key)},
+    ${JSON.stringify(value)}
+  );
+})()`;
+
+const EVAL_GET_NODE_PROPS = (uuid) => `(() => {
+  const targetUuid = ${JSON.stringify(uuid)};
+  const bridge = window.__cocosHierarchyBridge__;
+  if (bridge && typeof bridge.getNodeProperties === "function") {
+    try {
+      return bridge.getNodeProperties(targetUuid);
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err), properties: [] };
+    }
+  }
+
+  const cc = window.cc?.director ? window.cc : (window.cocos?.director ? window.cocos : null);
+  const scene = cc?.director?.getScene?.();
+  if (!scene) return { ok: false, error: "No active scene", properties: [] };
+
+  function findNodeByUuid(root, id) {
+    if (!root) return null;
+    if (root.uuid === id) return root;
+    for (const child of root.children || []) {
+      const found = findNodeByUuid(child, id);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  function asVec3(value, fallback) {
+    const base = fallback || { x: 0, y: 0, z: 0 };
+    if (!value || typeof value !== "object") return { ...base };
+    return {
+      x: Number.isFinite(Number(value.x)) ? Number(value.x) : base.x,
+      y: Number.isFinite(Number(value.y)) ? Number(value.y) : base.y,
+      z: Number.isFinite(Number(value.z)) ? Number(value.z) : base.z,
+    };
+  }
+
+  const resolved =
+    findNodeByUuid(scene, String(targetUuid || "").trim()) ||
+    (window.$n && window.$n.uuid === targetUuid ? window.$n : null);
+  if (!resolved) return { ok: false, error: "Node not found", properties: [] };
+
+  const properties = [];
+  try {
+    properties.push({ key: "name", rawKey: "name", type: "string", fields: null, value: String(resolved.name ?? "") });
+  } catch {}
+  try {
+    properties.push({ key: "active", rawKey: "active", type: "boolean", fields: null, value: !!resolved.active });
+  } catch {}
+  try {
+    let pos = resolved.position;
+    if (!pos && typeof resolved.getPosition === "function") pos = resolved.getPosition();
+    if (!pos) pos = { x: resolved.x ?? 0, y: resolved.y ?? 0, z: resolved.z ?? 0 };
+    properties.push({ key: "position", rawKey: "position", type: "vec3", fields: ["x", "y", "z"], value: asVec3(pos) });
+  } catch {
+    properties.push({ key: "position", rawKey: "position", type: "vec3", fields: ["x", "y", "z"], value: { x: 0, y: 0, z: 0 } });
+  }
+  try {
+    let scale = resolved.scale;
+    if (!scale && typeof resolved.getScale === "function") scale = resolved.getScale();
+    properties.push({
+      key: "scale",
+      rawKey: "scale",
+      type: "vec3",
+      fields: ["x", "y", "z"],
+      value: asVec3(scale, { x: 1, y: 1, z: 1 }),
+    });
+  } catch {
+    properties.push({ key: "scale", rawKey: "scale", type: "vec3", fields: ["x", "y", "z"], value: { x: 1, y: 1, z: 1 } });
+  }
+  try {
+    if (resolved.eulerAngles) {
+      properties.push({
+        key: "eulerAngles",
+        rawKey: "eulerAngles",
+        type: "vec3",
+        fields: ["x", "y", "z"],
+        value: asVec3(resolved.eulerAngles),
+      });
+    }
+  } catch {}
+  try {
+    if (typeof resolved.angle === "number") {
+      properties.push({ key: "angle", rawKey: "angle", type: "number", fields: null, value: resolved.angle });
+    }
+  } catch {}
+  try {
+    if (typeof resolved.layer === "number") {
+      properties.push({ key: "layer", rawKey: "layer", type: "number", fields: null, value: resolved.layer });
+    }
+  } catch {}
+
+  return { ok: true, properties };
+})()`;
+
+const EVAL_SET_NODE_PROP = (uuid, key, value) => `(() => {
+  const targetUuid = ${JSON.stringify(uuid)};
+  const propKey = ${JSON.stringify(key)};
+  const nextValue = ${JSON.stringify(value)};
+  const bridge = window.__cocosHierarchyBridge__;
+  if (bridge && typeof bridge.setNodeProperty === "function") {
+    try {
+      return bridge.setNodeProperty(targetUuid, propKey, nextValue);
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) };
+    }
+  }
+
+  const cc = window.cc?.director ? window.cc : (window.cocos?.director ? window.cocos : null);
+  const scene = cc?.director?.getScene?.();
+  function findNodeByUuid(root, id) {
+    if (!root) return null;
+    if (root.uuid === id) return root;
+    for (const child of root.children || []) {
+      const found = findNodeByUuid(child, id);
+      if (found) return found;
+    }
+    return null;
+  }
+  const node =
+    (scene && findNodeByUuid(scene, String(targetUuid || "").trim())) ||
+    (window.$n && window.$n.uuid === targetUuid ? window.$n : null);
+  if (!node) return { ok: false, error: "Node not found" };
+
+  try {
+    if (propKey === "name") {
+      node.name = String(nextValue ?? "");
+      return { ok: true, key: propKey, type: "string", value: node.name };
+    }
+    if (propKey === "active") {
+      node.active = nextValue === true || nextValue === "true" || nextValue === 1 || nextValue === "1";
+      return { ok: true, key: propKey, type: "boolean", value: !!node.active };
+    }
+    if (propKey === "layer" || propKey === "angle") {
+      const n = Number(nextValue);
+      if (!Number.isFinite(n)) return { ok: false, error: "Invalid number" };
+      node[propKey] = n;
+      return { ok: true, key: propKey, type: "number", value: node[propKey] };
+    }
+    if (propKey === "position" || propKey === "scale" || propKey === "eulerAngles") {
+      const x = Number(nextValue?.x) || 0;
+      const y = Number(nextValue?.y) || 0;
+      const z = Number(nextValue?.z) || 0;
+      if (propKey === "position") {
+        if (typeof node.setPosition === "function") node.setPosition(x, y, z);
+        else if (node.position) { node.position.x = x; node.position.y = y; node.position.z = z; }
+        else { node.x = x; node.y = y; node.z = z; }
+      } else if (propKey === "scale") {
+        if (typeof node.setScale === "function") node.setScale(x, y, z);
+        else if (node.scale) { node.scale.x = x; node.scale.y = y; node.scale.z = z; }
+      } else if (propKey === "eulerAngles") {
+        if (typeof node.setRotationFromEuler === "function") node.setRotationFromEuler(x, y, z);
+        else if (node.eulerAngles) { node.eulerAngles.x = x; node.eulerAngles.y = y; node.eulerAngles.z = z; }
+      }
+      return { ok: true, key: propKey, type: "vec3", fields: ["x", "y", "z"], value: { x, y, z } };
+    }
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
+  }
+  return { ok: false, error: "Unsupported node property: " + propKey };
 })()`;
 
 const EVAL_TOGGLE = (uuid) => `(() => {
@@ -422,6 +615,28 @@ function togglePauseResume() {
 function syncPauseStateFromPage() {
   evalInPage(EVAL_GET_PAUSE_STATE, (result) => {
     if (result?.ok) updatePauseResumeUI(result.paused);
+  });
+}
+
+function setToolsPanelOpen(open) {
+  toolsPanelEl.hidden = !open;
+  toolsToggleBtnEl.classList.toggle("active", open);
+  toolsToggleBtnEl.setAttribute("aria-expanded", open ? "true" : "false");
+  toolsToggleBtnEl.title = open ? "Hide tools" : "Show tools";
+  toolsToggleBtnEl.textContent = open ? "Tools ▴" : "Tools ▾";
+  try {
+    localStorage.setItem(TOOLS_PANEL_STORAGE_KEY, open ? "1" : "0");
+  } catch {}
+}
+
+function initToolsPanelToggle() {
+  let open = false;
+  try {
+    open = localStorage.getItem(TOOLS_PANEL_STORAGE_KEY) === "1";
+  } catch {}
+  setToolsPanelOpen(open);
+  toolsToggleBtnEl.addEventListener("click", () => {
+    setToolsPanelOpen(toolsPanelEl.hidden);
   });
 }
 
@@ -729,11 +944,21 @@ function focusReferenceHolder(nodeUuid) {
   highlightedReferenceNodeUuid = nodeUuid;
   const node = findNode(hierarchy.tree, nodeUuid);
   if (node) {
+    if (selectedUuid !== nodeUuid) {
+      selectedComponentIndex = null;
+      componentProperties = [];
+      componentPropertiesName = "";
+      nodeProperties = [];
+      nodePropertiesStatus = "idle";
+      nodePropertiesError = "";
+    }
     selectedUuid = nodeUuid;
     refUuidInputEl.value = nodeUuid;
     updateSpineTraceToolVisibility(node);
     evalInPage(EVAL_SELECT(nodeUuid), () => {});
+    nodePropertiesStatus = "loading";
     renderDetail(node);
+    loadNodeProperties(nodeUuid);
   }
   renderTree();
   setReferenceResults(referenceResults);
@@ -884,43 +1109,327 @@ function selectNode(node) {
     referenceResultsEl.className = "reference-results empty";
     referenceResultsEl.textContent = "No results yet.";
     referenceResults = [];
+    selectedComponentIndex = null;
+    componentProperties = [];
+    componentPropertiesName = "";
+    nodeProperties = [];
+    nodePropertiesStatus = "idle";
+    nodePropertiesError = "";
   }
   updateSpineTraceToolVisibility(node);
   evalInPage(EVAL_SELECT(node.uuid), () => {});
+  nodePropertiesStatus = "loading";
   renderDetail(node);
+  loadNodeProperties(node.uuid);
   renderTree();
+}
+
+function isEditingComponentProperty() {
+  const active = document.activeElement;
+  return !!(active && detailEl.contains(active) && active.classList.contains("prop-value"));
+}
+
+function formatScalarPropValue(prop) {
+  if (prop.type === "boolean") return prop.value ? "true" : "false";
+  if (prop.type === "number") return String(prop.value);
+  return prop.value == null ? "" : String(prop.value);
+}
+
+function formatFieldValue(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "0";
+  return String(n);
+}
+
+function renderPropRowsHtml(properties, scope) {
+  return properties
+    .map((prop) => {
+      const key = escapeHtml(prop.key);
+      const scopeAttr = `data-prop-scope="${escapeHtml(scope)}"`;
+      if (prop.type === "boolean") {
+        return `
+          <div class="prop-row" ${scopeAttr} data-prop-key="${key}" data-prop-type="boolean">
+            <label title="${key}">${key}</label>
+            <input class="prop-value" type="checkbox" ${prop.value ? "checked" : ""} />
+          </div>
+        `;
+      }
+      if (prop.fields?.length) {
+        const inputs = prop.fields
+          .map((field) => {
+            const fieldName = escapeHtml(field);
+            const fieldValue = escapeHtml(formatFieldValue(prop.value?.[field]));
+            return `
+              <label class="prop-vec-field">
+                <span>${fieldName}</span>
+                <input class="prop-value" data-field="${fieldName}" type="number" step="any" value="${fieldValue}" />
+              </label>
+            `;
+          })
+          .join("");
+        return `
+          <div class="prop-row prop-row-vector" ${scopeAttr} data-prop-key="${key}" data-prop-type="${escapeHtml(prop.type)}">
+            <label title="${key}">${key}</label>
+            <div class="prop-vec">${inputs}</div>
+          </div>
+        `;
+      }
+      if (prop.type === "number") {
+        return `
+          <div class="prop-row" ${scopeAttr} data-prop-key="${key}" data-prop-type="number">
+            <label title="${key}">${key}</label>
+            <input class="prop-value" type="number" step="any" value="${escapeHtml(formatScalarPropValue(prop))}" />
+          </div>
+        `;
+      }
+      return `
+        <div class="prop-row" ${scopeAttr} data-prop-key="${key}" data-prop-type="string">
+          <label title="${key}">${key}</label>
+          <input class="prop-value" type="text" value="${escapeHtml(formatScalarPropValue(prop))}" />
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderNodePropertiesHtml() {
+  if (nodePropertiesStatus === "loading" || nodePropertiesStatus === "idle") {
+    return `
+      <div class="component-props">
+        <h2>Node properties</h2>
+        <div class="component-props empty">Loading node properties…</div>
+      </div>
+    `;
+  }
+  if (nodePropertiesStatus === "error") {
+    return `
+      <div class="component-props">
+        <h2>Node properties</h2>
+        <div class="component-props empty">${escapeHtml(nodePropertiesError || "Failed to load node properties.")}</div>
+      </div>
+    `;
+  }
+  if (!nodeProperties.length) {
+    return `
+      <div class="component-props">
+        <h2>Node properties</h2>
+        <div class="component-props empty">No editable node properties.</div>
+      </div>
+    `;
+  }
+  return `
+    <div class="component-props">
+      <h2>Node properties</h2>
+      <div class="prop-list">${renderPropRowsHtml(nodeProperties, "node")}</div>
+    </div>
+  `;
+}
+
+function renderComponentPropertiesHtml() {
+  if (selectedComponentIndex == null) {
+    return `<div class="component-props empty">Click a component to inspect editable properties.</div>`;
+  }
+  if (!componentProperties.length) {
+    return `
+      <div class="component-props">
+        <h2>${escapeHtml(componentPropertiesName || "Component")} properties</h2>
+        <div class="component-props empty">No editable properties found.</div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="component-props">
+      <h2>${escapeHtml(componentPropertiesName || "Component")} properties</h2>
+      <div class="prop-list">${renderPropRowsHtml(componentProperties, "component")}</div>
+    </div>
+  `;
+}
+
+function readPropRowValue(row, type) {
+  if (type === "boolean") {
+    return row.querySelector(".prop-value")?.checked;
+  }
+  const fields = [...row.querySelectorAll(".prop-value[data-field]")];
+  if (fields.length) {
+    const value = {};
+    fields.forEach((input) => {
+      value[input.getAttribute("data-field")] = Number(input.value);
+    });
+    return value;
+  }
+  const input = row.querySelector(".prop-value");
+  if (!input) return undefined;
+  if (type === "number") return input.value === "" ? NaN : Number(input.value);
+  return input.value;
+}
+
+function applyPropResultToRow(row, type, resultValue) {
+  if (type === "boolean") {
+    const input = row.querySelector(".prop-value");
+    if (input) input.checked = !!resultValue;
+    return;
+  }
+  const fields = [...row.querySelectorAll(".prop-value[data-field]")];
+  if (fields.length) {
+    fields.forEach((input) => {
+      if (document.activeElement === input) return;
+      const field = input.getAttribute("data-field");
+      input.value = formatFieldValue(resultValue?.[field]);
+    });
+    return;
+  }
+  const input = row.querySelector(".prop-value");
+  if (input && document.activeElement !== input) {
+    input.value = formatScalarPropValue({ type, value: resultValue });
+  }
+}
+
+function bindPropertyEditors(node) {
+  detailEl.querySelectorAll(".prop-row").forEach((row) => {
+    const scope = row.getAttribute("data-prop-scope");
+    const key = row.getAttribute("data-prop-key");
+    const type = row.getAttribute("data-prop-type");
+    const inputs = [...row.querySelectorAll(".prop-value")];
+    if (!scope || !key || !inputs.length) return;
+
+    const commit = () => {
+      const value = readPropRowValue(row, type);
+      const expression =
+        scope === "node"
+          ? EVAL_SET_NODE_PROP(node.uuid, key, value)
+          : selectedComponentIndex == null
+            ? null
+            : EVAL_SET_COMPONENT_PROP(node.uuid, selectedComponentIndex, key, value);
+      if (!expression) return;
+
+      evalInPage(expression, (result, err) => {
+        if (err || !result?.ok) {
+          setToolStatus(result?.error || err || "Failed to set property.", "error");
+          if (scope === "node") loadNodeProperties(node.uuid);
+          else loadComponentProperties(node.uuid, selectedComponentIndex);
+          return;
+        }
+        if (scope === "node") {
+          const prop = nodeProperties.find((item) => item.key === key);
+          if (prop) prop.value = result.value;
+        } else {
+          const prop = componentProperties.find((item) => item.key === key);
+          if (prop) prop.value = result.value;
+        }
+        applyPropResultToRow(row, type, result.value);
+        const label = scope === "node" ? "node" : componentPropertiesName || "component";
+        const display =
+          result.fields?.length && result.value && typeof result.value === "object"
+            ? result.fields.map((field) => `${field}:${result.value[field]}`).join(", ")
+            : String(result.value);
+        setToolStatus(`Set ${label}.${key} = ${display}`, "ok");
+        if (scope === "node" && (key === "active" || key === "name")) {
+          // hierarchy labels / active state may change
+          refresh();
+        }
+      });
+    };
+
+    inputs.forEach((input) => {
+      if (type === "boolean") {
+        input.addEventListener("change", commit);
+      } else {
+        input.addEventListener("change", commit);
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            input.blur();
+          }
+        });
+      }
+    });
+  });
+}
+
+function loadNodeProperties(uuid, options = {}) {
+  const { silent = false } = options;
+  if (!silent || nodePropertiesStatus !== "ready") {
+    nodePropertiesStatus = "loading";
+    nodePropertiesError = "";
+  }
+  evalInPage(EVAL_GET_NODE_PROPS(uuid), (result, err) => {
+    if (selectedUuid !== uuid) return;
+    if (err || !result?.ok) {
+      if (!silent || nodePropertiesStatus !== "ready") {
+        nodeProperties = [];
+        nodePropertiesStatus = "error";
+        nodePropertiesError = result?.error || err || "Failed to load node properties.";
+      }
+      if (!silent) setToolStatus(result?.error || err || "Failed to load node properties.", "error");
+      if (!isEditingComponentProperty()) {
+        const node = hierarchy?.tree ? findNode(hierarchy.tree, uuid) : null;
+        if (node) renderDetail(node);
+      }
+      return;
+    }
+    nodeProperties = result.properties || [];
+    nodePropertiesStatus = "ready";
+    nodePropertiesError = "";
+    if (!isEditingComponentProperty()) {
+      const node = hierarchy?.tree ? findNode(hierarchy.tree, uuid) : null;
+      if (node) renderDetail(node);
+    }
+  });
+}
+
+function loadComponentProperties(uuid, componentIndex, options = {}) {
+  const { silent = false } = options;
+  evalInPage(EVAL_GET_COMPONENT_PROPS(uuid, componentIndex), (result, err) => {
+    if (err || !result?.ok) {
+      componentProperties = [];
+      componentPropertiesName = "";
+      if (!silent) setToolStatus(result?.error || err || "Failed to load properties.", "error");
+      const node = hierarchy?.tree && selectedUuid ? findNode(hierarchy.tree, selectedUuid) : null;
+      if (node && !isEditingComponentProperty()) renderDetail(node);
+      return;
+    }
+    componentProperties = result.properties || [];
+    componentPropertiesName = result.componentName || "Component";
+    const node = hierarchy?.tree && selectedUuid ? findNode(hierarchy.tree, selectedUuid) : null;
+    if (node && !isEditingComponentProperty()) renderDetail(node);
+  });
 }
 
 function renderDetail(node) {
   if (!node) {
     detailEl.className = "detail empty";
     detailEl.textContent = "Select a node";
+    selectedComponentIndex = null;
+    componentProperties = [];
+    componentPropertiesName = "";
+    nodeProperties = [];
+    nodePropertiesStatus = "idle";
+    nodePropertiesError = "";
     return;
   }
 
   detailEl.className = "detail";
-  const pos = node.position;
   const comps = node.components
     .map((c, i) => {
       const isSpine = /spine|skeleton/i.test(c);
-      return `<button class="component${isSpine ? " spine" : ""}" data-component-index="${i}" type="button" title="Set as $c in console">${escapeHtml(c)}</button>`;
+      const selected = selectedComponentIndex === i ? " selected" : "";
+      return `<button class="component${isSpine ? " spine" : ""}${selected}" data-component-index="${i}" type="button" title="Inspect properties and set as $c">${escapeHtml(c)}</button>`;
     })
     .join("");
 
   detailEl.innerHTML = `
     <table>
-      <tr><th>Name</th><td>${escapeHtml(node.name)}</td></tr>
       <tr><th>UUID</th><td style="font-family:var(--mono);font-size:10px;word-break:break-all">${escapeHtml(node.uuid)}</td></tr>
-      <tr><th>Active</th><td>${node.active ? "Yes" : "No"}</td></tr>
       <tr><th>In Hierarchy</th><td>${node.activeInHierarchy ? "Yes" : "No"}</td></tr>
-      <tr><th>Position</th><td>${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)}</td></tr>
       <tr><th>Children</th><td>${node.childCount}</td></tr>
-      <tr><th>Layer</th><td>${node.layer}</td></tr>
     </table>
+    ${renderNodePropertiesHtml()}
     <div class="components">
       <h2>Components</h2>
       ${comps || '<span style="color:var(--text-dim)">None</span>'}
     </div>
+    ${renderComponentPropertiesHtml()}
     <div class="detail-actions">
       <button id="btn-log">Log to Console</button>
       <button id="btn-toggle">${node.active ? "Deactivate" : "Activate"}</button>
@@ -940,6 +1449,10 @@ function renderDetail(node) {
       event.preventDefault();
       event.stopPropagation();
       const index = Number(el.getAttribute("data-component-index"));
+      selectedComponentIndex = index;
+      componentProperties = [];
+      componentPropertiesName = node.components[index] || "Component";
+      renderDetail(node);
       evalInPage(EVAL_SELECT_COMPONENT(node.uuid, index), (ok) => {
         if (ok) {
           setToolStatus(`Selected component set to $c (${node.components[index] || "Component"})`, "ok");
@@ -947,8 +1460,11 @@ function renderDetail(node) {
           setToolStatus("Failed to select component.", "error");
         }
       });
+      loadComponentProperties(node.uuid, index);
     });
   });
+
+  bindPropertyEditors(node);
 }
 
 function escapeHtml(str) {
@@ -983,9 +1499,23 @@ function refresh() {
       const node = findNode(hierarchy.tree, selectedUuid);
       if (node) {
         updateSpineTraceToolVisibility(node);
-        renderDetail(node);
+        if (isEditingComponentProperty()) {
+          // Keep editors intact while typing.
+        } else {
+          renderDetail(node);
+          loadNodeProperties(node.uuid, { silent: true });
+          if (selectedComponentIndex != null) {
+            loadComponentProperties(node.uuid, selectedComponentIndex, { silent: true });
+          }
+        }
       } else {
         selectedUuid = null;
+        selectedComponentIndex = null;
+        componentProperties = [];
+        componentPropertiesName = "";
+        nodeProperties = [];
+        nodePropertiesStatus = "idle";
+        nodePropertiesError = "";
         updateSpineTraceToolVisibility(null);
       }
     } else {
@@ -1152,6 +1682,7 @@ function connectPort() {
 
 connectPort();
 initTheme();
+initToolsPanelToggle();
 initToolsPanelResizer();
 setBuildNote();
 syncGameSpeedFromPage();
