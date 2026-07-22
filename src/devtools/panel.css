@@ -23,6 +23,9 @@
   --reference-highlight-border: rgba(255, 214, 102, 0.75);
   --reference-highlight-bg: rgba(255, 214, 102, 0.12);
   --spine-bg: rgba(197, 134, 192, 0.2);
+  --scrollbar-track: #1e1e1e;
+  --scrollbar-thumb: #4a4a4a;
+  --scrollbar-thumb-hover: #5e5e5e;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --mono: "SF Mono", Menlo, Consolas, monospace;
   --tools-width: 320px;
@@ -52,10 +55,41 @@
   --reference-highlight-border: rgba(234, 179, 8, 0.8);
   --reference-highlight-bg: rgba(234, 179, 8, 0.15);
   --spine-bg: rgba(147, 52, 230, 0.15);
+  --scrollbar-track: #f3f3f3;
+  --scrollbar-thumb: #c1c1c1;
+  --scrollbar-thumb-hover: #a8a8a8;
 }
 
 * {
   box-sizing: border-box;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 5px;
+  border: 2px solid var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-corner {
+  background: var(--scrollbar-track);
 }
 
 html,
