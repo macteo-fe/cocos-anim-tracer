@@ -765,6 +765,13 @@ body.resizing {
   overflow: auto;
 }
 
+.prop-list.resizable {
+  height: 220px;
+  min-height: 80px;
+  max-height: 60vh;
+  resize: vertical;
+}
+
 .prop-row {
   display: grid;
   grid-template-columns: 1fr minmax(90px, 1.2fr);

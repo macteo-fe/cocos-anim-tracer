@@ -50,6 +50,8 @@ let componentPropertiesName = "";
 let nodeProperties = [];
 let nodePropertiesStatus = "idle"; // idle | loading | ready | error
 let nodePropertiesError = "";
+let componentPropListHeight = null;
+let componentPropListObserver = null;
 const TOOLS_MIN_WIDTH = 260;
 const TOOLS_MAX_WIDTH = 700;
 const THEME_STORAGE_KEY = "animtracer-theme-preference";
@@ -1241,7 +1243,11 @@ function renderComponentPropertiesHtml() {
   return `
     <div class="component-props">
       <h2>${escapeHtml(componentPropertiesName || "Component")} properties</h2>
-      <div class="prop-list">${renderPropRowsHtml(componentProperties, "component")}</div>
+      <div
+        class="prop-list resizable"
+        id="component-prop-list"
+        ${componentPropListHeight ? `style="height:${componentPropListHeight}px"` : ""}
+      >${renderPropRowsHtml(componentProperties, "component")}</div>
     </div>
   `;
 }
@@ -1465,6 +1471,23 @@ function renderDetail(node) {
   });
 
   bindPropertyEditors(node);
+  bindComponentPropListResize();
+}
+
+function bindComponentPropListResize() {
+  const list = document.getElementById("component-prop-list");
+  if (componentPropListObserver) {
+    componentPropListObserver.disconnect();
+    componentPropListObserver = null;
+  }
+  if (!list || typeof ResizeObserver !== "function") return;
+  componentPropListObserver = new ResizeObserver((entries) => {
+    const entry = entries[0];
+    if (!entry) return;
+    const height = Math.round(entry.contentRect.height);
+    if (height > 0) componentPropListHeight = height;
+  });
+  componentPropListObserver.observe(list);
 }
 
 function escapeHtml(str) {
