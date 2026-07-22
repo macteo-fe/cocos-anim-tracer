@@ -322,10 +322,6 @@ const EVAL_SET_NODE_PROP = (uuid, key, value) => `(() => {
   return { ok: false, error: "Unsupported node property: " + propKey };
 })()`;
 
-const EVAL_TOGGLE = (uuid) => `(() => {
-  return window.__cocosHierarchyBridge__?.toggleActive(${JSON.stringify(uuid)}) ?? false;
-})()`;
-
 const EVAL_FIND_REFS = (uuid) => `(() => {
   const targetUuid = ${JSON.stringify(uuid)};
   const cc = window.cc?.director ? window.cc : (window.cocos?.director ? window.cocos : null);
@@ -944,11 +940,18 @@ function expandPathToNode(root, targetUuid) {
   return false;
 }
 
-function focusReferenceHolder(nodeUuid) {
+function highlightReferenceNode(nodeUuid) {
   if (!hierarchy?.tree || !nodeUuid) return;
   expansionMode = "default";
   expandPathToNode(hierarchy.tree, nodeUuid);
   highlightedReferenceNodeUuid = nodeUuid;
+  renderTree();
+  setReferenceResults(referenceResults);
+}
+
+function focusReferenceHolder(nodeUuid) {
+  if (!hierarchy?.tree || !nodeUuid) return;
+  highlightReferenceNode(nodeUuid);
   const node = findNode(hierarchy.tree, nodeUuid);
   if (node) {
     if (selectedUuid !== nodeUuid) {
@@ -967,8 +970,6 @@ function focusReferenceHolder(nodeUuid) {
     renderDetail(node);
     loadNodeProperties(nodeUuid);
   }
-  renderTree();
-  setReferenceResults(referenceResults);
 }
 
 function updateClearFiltersButton() {
@@ -1242,6 +1243,54 @@ function renderPropRowsHtml(properties, scope) {
           </div>
         `;
       }
+      if (prop.type === "nodeRef" || prop.type === "componentRef") {
+        const uuid = escapeHtml(prop.value?.uuid || "");
+        const label =
+          prop.type === "componentRef"
+            ? `${prop.value?.componentName || "Component"} @ ${prop.value?.name || "(unnamed)"}`
+            : prop.value?.name || "(unnamed)";
+        const title = prop.value?.path || prop.value?.uuid || label;
+        return `
+          <div class="prop-row prop-row-ref" ${scopeAttr} data-prop-key="${key}" data-prop-type="${escapeHtml(prop.type)}">
+            <label title="${key}">${key}</label>
+            <button
+              type="button"
+              class="prop-ref-link"
+              data-ref-uuid="${uuid}"
+              title="${escapeHtml(title)}"
+              ${uuid ? "" : "disabled"}
+            >${escapeHtml(label)}</button>
+          </div>
+        `;
+      }
+      if (prop.type === "refList" && Array.isArray(prop.value)) {
+        const links = prop.value
+          .map((item, index) => {
+            const uuid = escapeHtml(item.value?.uuid || "");
+            const itemType = item.type || "nodeRef";
+            const label =
+              itemType === "componentRef"
+                ? `[${index}] ${item.value?.componentName || "Component"} @ ${item.value?.name || "(unnamed)"}`
+                : `[${index}] ${item.value?.name || "(unnamed)"}`;
+            const title = item.value?.path || item.value?.uuid || label;
+            return `
+              <button
+                type="button"
+                class="prop-ref-link"
+                data-ref-uuid="${uuid}"
+                title="${escapeHtml(title)}"
+                ${uuid ? "" : "disabled"}
+              >${escapeHtml(label)}</button>
+            `;
+          })
+          .join("");
+        return `
+          <div class="prop-row prop-row-ref" ${scopeAttr} data-prop-key="${key}" data-prop-type="refList">
+            <label title="${key}">${key}</label>
+            <div class="prop-ref-list">${links || '<span class="prop-ref-empty">Empty</span>'}</div>
+          </div>
+        `;
+      }
       if (prop.fields?.length) {
         const inputs = prop.fields
           .map((field) => {
@@ -1378,10 +1427,25 @@ function applyPropResultToRow(row, type, resultValue) {
 }
 
 function bindPropertyEditors(node) {
+  detailEl.querySelectorAll(".prop-ref-link").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const uuid = btn.getAttribute("data-ref-uuid");
+      if (!uuid) {
+        setToolStatus("Reference has no node UUID.", "error");
+        return;
+      }
+      highlightReferenceNode(uuid);
+      setToolStatus(`Highlighted ${btn.textContent.trim()}`, "ok");
+    });
+  });
+
   detailEl.querySelectorAll(".prop-row").forEach((row) => {
     const scope = row.getAttribute("data-prop-scope");
     const key = row.getAttribute("data-prop-key");
     const type = row.getAttribute("data-prop-type");
+    if (type === "nodeRef" || type === "componentRef" || type === "refList") return;
     const inputs = [...row.querySelectorAll(".prop-value")];
     if (!scope || !key || !inputs.length) return;
 
@@ -1524,19 +1588,7 @@ function renderDetail(node) {
       ${comps || '<span style="color:var(--text-dim)">None</span>'}
     </div>
     ${renderComponentPropertiesHtml()}
-    <div class="detail-actions">
-      <button id="btn-log">Log to Console</button>
-      <button id="btn-toggle">${node.active ? "Deactivate" : "Activate"}</button>
-    </div>
   `;
-
-  document.getElementById("btn-log").addEventListener("click", () => {
-    evalInPage(EVAL_SELECT(node.uuid), () => {});
-  });
-
-  document.getElementById("btn-toggle").addEventListener("click", () => {
-    evalInPage(EVAL_TOGGLE(node.uuid), () => refresh());
-  });
 
   detailEl.querySelectorAll("[data-component-index]").forEach((el) => {
     el.addEventListener("click", (event) => {

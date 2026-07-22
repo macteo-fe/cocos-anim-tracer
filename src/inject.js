@@ -1,5 +1,5 @@
 (function () {
-  const BRIDGE_VERSION = 11;
+  const BRIDGE_VERSION = 12;
   // Always refresh bridge API so extension reloads apply even if an older
   // inject already set window.__cocosHierarchyBridge__.
 
@@ -217,6 +217,19 @@
     }
     if (type !== "object") return null;
 
+    if (Array.isArray(value)) {
+      const items = [];
+      for (let i = 0; i < value.length; i++) {
+        const item = describeReferenceValue(value[i]);
+        if (item) items.push({ ...item, index: i });
+      }
+      if (!items.length) return null;
+      return { type: "refList", fields: null, value: items };
+    }
+
+    const ref = describeReferenceValue(value);
+    if (ref) return ref;
+
     const name = ctorName(value);
     if (name === "Vec2" || name === "math.Vec2") {
       return { type: "vec2", fields: ["x", "y"], value: pickNumericFields(value, ["x", "y"]) };
@@ -225,7 +238,7 @@
       return { type: "vec3", fields: ["x", "y", "z"], value: pickNumericFields(value, ["x", "y", "z"]) };
     }
     if (name === "Vec4" || name === "math.Vec4" || name === "Quat" || name === "math.Quat") {
-      const fields = name.includes("Quat") || "w" in value ? ["x", "y", "z", "w"] : ["x", "y", "z", "w"];
+      const fields = ["x", "y", "z", "w"];
       return { type: name.includes("Quat") ? "quat" : "vec4", fields, value: pickNumericFields(value, fields) };
     }
     if (name === "Size" || name === "math.Size") {
@@ -250,8 +263,8 @@
       };
     }
 
-    // Duck-typing for plain / engine objects.
-    if ("width" in value && "height" in value) {
+    // Duck-typing for plain / engine objects (after node/component checks).
+    if ("width" in value && "height" in value && !value.uuid) {
       if ("x" in value && "y" in value) {
         return {
           type: "rect",
@@ -265,14 +278,85 @@
         value: pickNumericFields(value, ["width", "height"]),
       };
     }
-    if ("x" in value && "y" in value && "z" in value && "w" in value) {
+    if ("x" in value && "y" in value && "z" in value && "w" in value && !value.uuid) {
       return { type: "vec4", fields: ["x", "y", "z", "w"], value: pickNumericFields(value, ["x", "y", "z", "w"]) };
     }
-    if ("x" in value && "y" in value && "z" in value) {
+    if ("x" in value && "y" in value && "z" in value && !value.uuid) {
       return { type: "vec3", fields: ["x", "y", "z"], value: pickNumericFields(value, ["x", "y", "z"]) };
     }
-    if ("x" in value && "y" in value) {
+    if ("x" in value && "y" in value && !value.uuid && value._components === undefined) {
       return { type: "vec2", fields: ["x", "y"], value: pickNumericFields(value, ["x", "y"]) };
+    }
+    return null;
+  }
+
+  function isNodeReference(value) {
+    if (!value || typeof value !== "object") return false;
+    const name = ctorName(value);
+    if (name === "Node" || name === "Scene" || name === "PrivateNode" || name === "cc.Node") {
+      return true;
+    }
+    try {
+      return !!(value.uuid && (Array.isArray(value._components) || Array.isArray(value.children)));
+    } catch {
+      return false;
+    }
+  }
+
+  function isComponentReference(value) {
+    if (!value || typeof value !== "object") return false;
+    if (isNodeReference(value)) return false;
+    try {
+      if (value.node && isNodeReference(value.node)) return true;
+    } catch {}
+    const name = ctorName(value);
+    if (!name || name === "Object" || name === "Array") return false;
+    // Common Cocos component shape without walking prototypes.
+    try {
+      return value._id !== undefined && value.node != null;
+    } catch {
+      return false;
+    }
+  }
+
+  function describeReferenceValue(value) {
+    if (isNodeReference(value)) {
+      let path = "";
+      try {
+        path = getNodePath(value);
+      } catch {}
+      return {
+        type: "nodeRef",
+        fields: null,
+        value: {
+          uuid: String(value.uuid || ""),
+          name: String(value.name || "(unnamed)"),
+          path,
+        },
+      };
+    }
+    if (isComponentReference(value)) {
+      const owner = value.node;
+      let componentName = "Component";
+      try {
+        componentName = getComponentDisplayName(value);
+      } catch {}
+      return {
+        type: "componentRef",
+        fields: null,
+        value: {
+          uuid: String(owner?.uuid || ""),
+          name: String(owner?.name || "(unnamed)"),
+          componentName,
+          path: (() => {
+            try {
+              return owner ? getNodePath(owner) : "";
+            } catch {
+              return "";
+            }
+          })(),
+        },
+      };
     }
     return null;
   }
