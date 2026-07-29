@@ -852,11 +852,13 @@ body.resizing {
 }
 
 .tree-row.marked-highlight {
-  box-shadow: inset 0 0 0 1px var(--accent);
+  box-shadow: inset 3px 0 0 0 var(--mark-color, var(--accent)), inset 0 0 0 1px var(--mark-color, var(--accent));
+  background: var(--mark-color-bg, var(--accent-bg));
 }
 
 .tree-row.marked-highlight .node-name {
   font-weight: 600;
+  color: var(--mark-color, var(--accent));
 }
 
 .toggle {
@@ -946,7 +948,7 @@ body.resizing {
 }
 
 .mark-toggle.active {
-  color: var(--warning);
+  color: var(--mark-color, var(--warning));
 }
 
 .node-badge.spine {

@@ -79,7 +79,25 @@ const DEFAULT_TOOL_FEATURES = {
 };
 
 let themePreference = "auto";
-let markedNodeUuids = new Set();
+let markedNodes = new Map(); // uuid -> { color }
+const MARK_COLOR_PALETTE = [
+  "#f94144",
+  "#f3722c",
+  "#f8961e",
+  "#90be6d",
+  "#43aa8b",
+  "#4d908e",
+  "#577590",
+  "#277da1",
+  "#9b5de5",
+  "#f15bb5",
+  "#00bbf9",
+  "#00f5d4",
+  "#fee440",
+  "#ff6b6b",
+  "#48cae4",
+  "#b5179e",
+];
 let toolFeatures = { ...DEFAULT_TOOL_FEATURES };
 
 function devToolsThemeToPanel(theme) {
@@ -1242,34 +1260,91 @@ function loadMarkedNodes() {
     const raw = localStorage.getItem(MARKED_NODES_STORAGE_KEY);
     if (!raw) return;
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return;
-    markedNodeUuids = new Set(
-      parsed
-        .map((uuid) => String(uuid || "").trim())
-        .filter(Boolean)
-    );
+    markedNodes = new Map();
+    if (Array.isArray(parsed)) {
+      parsed.forEach((entry) => {
+        if (typeof entry === "string") {
+          const uuid = String(entry || "").trim();
+          if (uuid) markedNodes.set(uuid, { color: allocateMarkColor() });
+          return;
+        }
+        if (!entry || typeof entry !== "object") return;
+        const uuid = String(entry.uuid || "").trim();
+        if (!uuid) return;
+        const color = normalizeMarkColor(entry.color) || allocateMarkColor();
+        markedNodes.set(uuid, { color });
+      });
+      saveMarkedNodes();
+    }
   } catch {}
 }
 
 function saveMarkedNodes() {
   try {
-    localStorage.setItem(MARKED_NODES_STORAGE_KEY, JSON.stringify([...markedNodeUuids]));
+    const payload = [...markedNodes.entries()].map(([uuid, meta]) => ({
+      uuid,
+      color: meta.color,
+    }));
+    localStorage.setItem(MARKED_NODES_STORAGE_KEY, JSON.stringify(payload));
   } catch {}
 }
 
+function normalizeMarkColor(color) {
+  const value = String(color || "").trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(value)) return value.toLowerCase();
+  return "";
+}
+
+function allocateMarkColor() {
+  const used = new Set([...markedNodes.values()].map((meta) => String(meta.color || "").toLowerCase()));
+  const unused = MARK_COLOR_PALETTE.filter((color) => !used.has(color.toLowerCase()));
+  if (unused.length) {
+    return unused[Math.floor(Math.random() * unused.length)];
+  }
+  // Fallback when palette is exhausted: random distinct-ish hue.
+  const hue = Math.floor(Math.random() * 360);
+  return hslToHex(hue, 72, 54);
+}
+
+function hslToHex(h, s, l) {
+  const sat = s / 100;
+  const light = l / 100;
+  const c = (1 - Math.abs(2 * light - 1)) * sat;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = light - c / 2;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (h < 60) [r, g, b] = [c, x, 0];
+  else if (h < 120) [r, g, b] = [x, c, 0];
+  else if (h < 180) [r, g, b] = [0, c, x];
+  else if (h < 240) [r, g, b] = [0, x, c];
+  else if (h < 300) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const toHex = (n) =>
+    Math.round((n + m) * 255)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
 function isMarkedNode(uuid) {
-  return markedNodeUuids.has(String(uuid || "").trim());
+  return markedNodes.has(String(uuid || "").trim());
+}
+
+function getMarkedNodeColor(uuid) {
+  return markedNodes.get(String(uuid || "").trim())?.color || "";
 }
 
 function toggleMarkedNode(uuid) {
   const id = String(uuid || "").trim();
   if (!id) return false;
   let marked = false;
-  if (markedNodeUuids.has(id)) {
-    markedNodeUuids.delete(id);
+  if (markedNodes.has(id)) {
+    markedNodes.delete(id);
     marked = false;
   } else {
-    markedNodeUuids.add(id);
+    markedNodes.set(id, { color: allocateMarkColor() });
     marked = true;
   }
   saveMarkedNodes();
@@ -1277,9 +1352,9 @@ function toggleMarkedNode(uuid) {
 }
 
 function ensureExpandedForMarkedNode(root) {
-  if (!root || !markedNodeUuids.size) return;
+  if (!root || !markedNodes.size) return;
   expansionMode = "default";
-  for (const uuid of markedNodeUuids) {
+  for (const uuid of markedNodes.keys()) {
     expandPathToNode(root, uuid);
   }
 }
@@ -1325,6 +1400,7 @@ function renderNode(node, depth, container) {
   const isExpanded = isNodeExpanded(node, depth);
   const isSelected = selectedUuid === node.uuid;
   const isMarked = isMarkedNode(node.uuid);
+  const markColor = isMarked ? getMarkedNodeColor(node.uuid) : "";
   const isDirectMatch = hasActiveFilters() && nodeMatchesSelf(node);
   const matchedComponents = getMatchingComponents(node);
 
@@ -1337,7 +1413,13 @@ function renderNode(node, depth, container) {
   if (!node.activeInHierarchy) row.classList.add("inactive");
   if (node.isSpine) row.classList.add("spine");
   if (isSelected) row.classList.add("selected");
-  if (isMarked) row.classList.add("marked-highlight");
+  if (isMarked) {
+    row.classList.add("marked-highlight");
+    if (markColor) {
+      row.style.setProperty("--mark-color", markColor);
+      row.style.setProperty("--mark-color-bg", `${markColor}33`);
+    }
+  }
   if (isDirectMatch) row.classList.add("filter-match");
   if (highlightedReferenceNodeUuid === node.uuid) row.classList.add("reference-highlight");
   row.style.paddingLeft = `${depth * 12 + 4}px`;
@@ -1383,6 +1465,9 @@ function renderNode(node, depth, container) {
   markBtn.className = `mark-toggle${isMarked ? " active" : ""}`;
   markBtn.textContent = "★";
   markBtn.title = isMarked ? "Unmark node" : "Mark node";
+  if (isMarked && markColor) {
+    markBtn.style.color = markColor;
+  }
   markBtn.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
