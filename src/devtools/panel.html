@@ -13,6 +13,7 @@
         Auto
       </label>
       <span id="status" class="status">Waiting for Cocos…</span>
+      <span id="tool-status" class="tool-status" title="Action log">Actions log to page console.</span>
       <span class="toolbar-spacer"></span>
       <button id="btn-theme-toggle" type="button" class="theme-toggle" title="Toggle theme (Shift+click to match DevTools)">
         <span class="theme-icon" aria-hidden="true"></span>
@@ -46,19 +47,30 @@
       <section class="detail-panel">
         <div class="detail-panel-header">
           <h2>Node Details</h2>
-          <button
-            id="btn-toggle-tools"
-            type="button"
-            class="tools-toggle"
-            aria-expanded="false"
-            aria-controls="tools-panel"
-            title="Show tools"
-          >
-            Tools
-          </button>
+          <div class="detail-panel-actions">
+            <button
+              id="btn-tool-settings"
+              type="button"
+              class="tools-settings-btn"
+              title="Tool feature settings"
+              aria-haspopup="dialog"
+            >
+              ⚙
+            </button>
+            <button
+              id="btn-toggle-tools"
+              type="button"
+              class="tools-toggle"
+              aria-expanded="false"
+              aria-controls="tools-panel"
+              title="Show tools"
+            >
+              Tools
+            </button>
+          </div>
         </div>
         <div id="tools-panel" class="tools-panel" hidden>
-          <div class="tool-box">
+          <div class="tool-box" data-tool-feature="game-speed">
             <label for="game-speed-range">Game speed</label>
             <div class="tool-row speed-row">
               <input id="game-speed-range" type="range" min="0.1" max="10" step="0.1" value="1" />
@@ -72,14 +84,14 @@
             </div>
             <button id="btn-pause-resume" type="button" class="pause-btn">Pause</button>
           </div>
-          <div class="tool-box">
+          <div class="tool-box" data-tool-feature="find-refs">
             <label for="ref-uuid-input">Find node references</label>
             <div class="tool-row">
               <input id="ref-uuid-input" type="text" placeholder="Node UUID (empty = selected node)" />
               <button id="btn-find-refs" type="button">Find</button>
             </div>
           </div>
-          <div id="spine-trace-tool" class="tool-box" hidden>
+          <div id="spine-trace-tool" class="tool-box" data-tool-feature="spine-trace" hidden>
             <label for="spine-animation-input">Trace Spine animation</label>
             <div class="tool-row">
               <input
@@ -94,15 +106,66 @@
             </div>
             <div id="spine-animation-suggestion-list" class="suggestion-list" hidden></div>
           </div>
-          <div class="tool-box">
+          <div class="tool-box" data-tool-feature="find-refs">
             <label>Reference results</label>
             <div id="reference-results" class="reference-results empty">No results yet.</div>
           </div>
-          <div id="tool-status" class="tool-status">Actions log to page console.</div>
+          <div class="tool-box" data-tool-feature="node-breaks">
+            <label for="break-event-type">Node event breaks</label>
+            <div class="break-target" id="break-node-target">Not selected</div>
+            <div class="tool-row">
+              <select id="break-event-type" title="Event type">
+                <option value="parent-change">Parent change</option>
+                <option value="active-change">Active change</option>
+                <option value="add-child">Add child</option>
+                <option value="remove-child">Remove child</option>
+                <option value="transform-change">Transform change</option>
+              </select>
+            </div>
+            <div class="tool-row break-actions">
+              <button id="btn-add-node-break" type="button">Add break</button>
+              <button id="btn-clear-node-breaks" type="button">Clear breaks</button>
+            </div>
+            <div id="node-break-list" class="node-break-list empty">No breaks registered.</div>
+          </div>
         </div>
         <div id="detail" class="detail empty">Select a node</div>
       </section>
     </main>
+
+    <div id="tool-settings-overlay" class="tool-settings-overlay" hidden>
+      <div
+        id="tool-settings-dialog"
+        class="tool-settings-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="tool-settings-title"
+      >
+        <div class="tool-settings-header">
+          <h3 id="tool-settings-title">Tool features</h3>
+          <button id="btn-close-tool-settings" type="button" class="tool-settings-close" title="Close">
+            ✕
+          </button>
+        </div>
+        <p class="tool-settings-hint">Choose which tools appear in the Tools panel.</p>
+        <label class="tool-settings-row">
+          <input type="checkbox" data-tool-setting="game-speed" />
+          <span>Game speed / Pause</span>
+        </label>
+        <label class="tool-settings-row">
+          <input type="checkbox" data-tool-setting="find-refs" />
+          <span>Find node references</span>
+        </label>
+        <label class="tool-settings-row">
+          <input type="checkbox" data-tool-setting="spine-trace" />
+          <span>Trace Spine animation</span>
+        </label>
+        <label class="tool-settings-row">
+          <input type="checkbox" data-tool-setting="node-breaks" />
+          <span>Node event breaks</span>
+        </label>
+      </div>
+    </div>
 
     <script src="build-info.js"></script>
     <script src="panel.js"></script>

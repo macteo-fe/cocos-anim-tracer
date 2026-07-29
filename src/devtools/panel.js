@@ -19,12 +19,20 @@ const clearSpineTraceBtn = document.getElementById("btn-clear-spine-trace");
 const referenceResultsEl = document.getElementById("reference-results");
 const toolStatusEl = document.getElementById("tool-status");
 const buildNoteEl = document.getElementById("build-note");
+const breakNodeTargetEl = document.getElementById("break-node-target");
+const breakEventTypeEl = document.getElementById("break-event-type");
+const addNodeBreakBtn = document.getElementById("btn-add-node-break");
+const clearNodeBreaksBtn = document.getElementById("btn-clear-node-breaks");
+const nodeBreakListEl = document.getElementById("node-break-list");
 const gameSpeedRangeEl = document.getElementById("game-speed-range");
 const gameSpeedInputEl = document.getElementById("game-speed-input");
 const pauseResumeBtnEl = document.getElementById("btn-pause-resume");
 const themeToggleBtnEl = document.getElementById("btn-theme-toggle");
 const toolsToggleBtnEl = document.getElementById("btn-toggle-tools");
+const toolsSettingsBtnEl = document.getElementById("btn-tool-settings");
 const toolsPanelEl = document.getElementById("tools-panel");
+const toolSettingsOverlayEl = document.getElementById("tool-settings-overlay");
+const closeToolSettingsBtnEl = document.getElementById("btn-close-tool-settings");
 const autoRefreshEl = document.getElementById("auto-refresh");
 const refreshBtn = document.getElementById("btn-refresh");
 
@@ -61,10 +69,18 @@ const TOOLS_MIN_WIDTH = 260;
 const TOOLS_MAX_WIDTH = 700;
 const THEME_STORAGE_KEY = "animtracer-theme-preference";
 const TOOLS_PANEL_STORAGE_KEY = "animtracer-tools-panel-open";
+const TOOL_FEATURES_STORAGE_KEY = "animtracer-tool-features";
 const MARKED_NODES_STORAGE_KEY = "animtracer-marked-node-uuids";
+const DEFAULT_TOOL_FEATURES = {
+  "game-speed": true,
+  "find-refs": true,
+  "spine-trace": true,
+  "node-breaks": true,
+};
 
 let themePreference = "auto";
 let markedNodeUuids = new Set();
+let toolFeatures = { ...DEFAULT_TOOL_FEATURES };
 
 function devToolsThemeToPanel(theme) {
   return theme === "dark" ? "dark" : "light";
@@ -519,6 +535,38 @@ const EVAL_GET_PAUSE_STATE = `(() => {
   return window.__cocosHierarchyBridge__?.getPauseState() ?? { ok: false, paused: false };
 })()`;
 
+const EVAL_REGISTER_NODE_BREAK = (uuid, eventType) => `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.registerNodeEventBreak !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page" };
+  }
+  return bridge.registerNodeEventBreak(${JSON.stringify(uuid)}, ${JSON.stringify(eventType)});
+})()`;
+
+const EVAL_CLEAR_NODE_BREAKS = `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.clearNodeEventBreaks !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page" };
+  }
+  return bridge.clearNodeEventBreaks();
+})()`;
+
+const EVAL_CLEAR_ONE_NODE_BREAK = (uuid, eventType) => `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.clearNodeEventBreaks !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page" };
+  }
+  return bridge.clearNodeEventBreaks(${JSON.stringify(uuid)}, ${JSON.stringify(eventType)});
+})()`;
+
+const EVAL_GET_NODE_BREAKS = `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.getNodeEventBreaks !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page", breaks: [] };
+  }
+  return bridge.getNodeEventBreaks();
+})()`;
+
 const EVAL_HIGHLIGHT_NODE = (uuid) => `(() => {
   const bridge = window.__cocosHierarchyBridge__;
   if (!bridge || typeof bridge.highlightNode !== "function") {
@@ -558,7 +606,81 @@ function setStatus(text, type = "") {
 
 function setToolStatus(text, type = "") {
   toolStatusEl.textContent = text;
+  toolStatusEl.title = text;
   toolStatusEl.className = `tool-status ${type}`;
+}
+
+function updateBreakNodeTargetLabel(node = null) {
+  const resolved =
+    node ||
+    (hierarchy?.tree && selectedUuid ? findNode(hierarchy.tree, selectedUuid) : null);
+  if (!resolved || !selectedUuid) {
+    breakNodeTargetEl.textContent = "Not selected";
+    breakNodeTargetEl.classList.remove("has-node");
+    breakNodeTargetEl.title = "";
+    return;
+  }
+  const label = `${resolved.name || "(unnamed)"} · ${resolved.uuid}`;
+  breakNodeTargetEl.textContent = label;
+  breakNodeTargetEl.classList.add("has-node");
+  breakNodeTargetEl.title = label;
+}
+
+function formatBreakEventType(eventType) {
+  switch (eventType) {
+    case "parent-change":
+      return "parent-change";
+    case "active-change":
+      return "active-change";
+    case "add-child":
+      return "add-child";
+    case "remove-child":
+      return "remove-child";
+    case "transform-change":
+      return "transform-change";
+    default:
+      return eventType || "unknown";
+  }
+}
+
+function renderNodeBreakList(items) {
+  const breaks = Array.isArray(items) ? items : [];
+  if (!breaks.length) {
+    nodeBreakListEl.className = "node-break-list empty";
+    nodeBreakListEl.textContent = "No breaks registered.";
+    return;
+  }
+  nodeBreakListEl.className = "node-break-list";
+  nodeBreakListEl.innerHTML = "";
+  breaks.forEach((entry) => {
+    const target = entry.uuid === "*" ? "all nodes" : entry.uuid;
+    const row = document.createElement("div");
+    row.className = "node-break-item";
+    row.innerHTML = `
+      <span class="node-break-type">${escapeHtml(formatBreakEventType(entry.eventType))}</span>
+      <span class="node-break-target" title="${escapeHtml(target)}">@ ${escapeHtml(target)}</span>
+    `;
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "node-break-remove";
+    removeBtn.title = "Remove this break";
+    removeBtn.textContent = "✕";
+    removeBtn.addEventListener("click", () => {
+      clearOneNodeBreak(entry.uuid, entry.eventType);
+    });
+    row.appendChild(removeBtn);
+    nodeBreakListEl.appendChild(row);
+  });
+}
+
+function refreshNodeBreakList() {
+  evalInPage(EVAL_GET_NODE_BREAKS, (result, err) => {
+    if (err || !result?.ok) {
+      renderNodeBreakList([]);
+      return;
+    }
+    renderNodeBreakList(result.breaks || []);
+  });
 }
 
 function setBuildNote() {
@@ -642,6 +764,85 @@ function initToolsPanelToggle() {
   setToolsPanelOpen(open);
   toolsToggleBtnEl.addEventListener("click", () => {
     setToolsPanelOpen(toolsPanelEl.hidden);
+  });
+}
+
+function isToolFeatureEnabled(featureId) {
+  return toolFeatures[featureId] !== false;
+}
+
+function loadToolFeatures() {
+  try {
+    const raw = localStorage.getItem(TOOL_FEATURES_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return;
+    toolFeatures = { ...DEFAULT_TOOL_FEATURES, ...parsed };
+  } catch {
+    toolFeatures = { ...DEFAULT_TOOL_FEATURES };
+  }
+}
+
+function saveToolFeatures() {
+  try {
+    localStorage.setItem(TOOL_FEATURES_STORAGE_KEY, JSON.stringify(toolFeatures));
+  } catch {}
+}
+
+function syncToolSettingsForm() {
+  toolSettingsOverlayEl.querySelectorAll("[data-tool-setting]").forEach((input) => {
+    const key = input.getAttribute("data-tool-setting");
+    input.checked = isToolFeatureEnabled(key);
+  });
+}
+
+function applyToolFeatureVisibility() {
+  document.querySelectorAll("[data-tool-feature]").forEach((el) => {
+    const featureId = el.getAttribute("data-tool-feature");
+    if (featureId === "spine-trace") return;
+    el.hidden = !isToolFeatureEnabled(featureId);
+  });
+
+  const selectedNode =
+    hierarchy?.tree && selectedUuid ? findNode(hierarchy.tree, selectedUuid) : null;
+  updateSpineTraceToolVisibility(selectedNode);
+}
+
+function openToolSettings() {
+  syncToolSettingsForm();
+  toolSettingsOverlayEl.hidden = false;
+}
+
+function closeToolSettings() {
+  toolSettingsOverlayEl.hidden = true;
+}
+
+function initToolFeatureSettings() {
+  loadToolFeatures();
+  applyToolFeatureVisibility();
+
+  toolsSettingsBtnEl.addEventListener("click", () => {
+    if (toolSettingsOverlayEl.hidden) openToolSettings();
+    else closeToolSettings();
+  });
+  closeToolSettingsBtnEl.addEventListener("click", closeToolSettings);
+  toolSettingsOverlayEl.addEventListener("click", (event) => {
+    if (event.target === toolSettingsOverlayEl) closeToolSettings();
+  });
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !toolSettingsOverlayEl.hidden) {
+      closeToolSettings();
+    }
+  });
+
+  toolSettingsOverlayEl.querySelectorAll("[data-tool-setting]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const key = input.getAttribute("data-tool-setting");
+      if (!key || !(key in DEFAULT_TOOL_FEATURES)) return;
+      toolFeatures[key] = !!input.checked;
+      saveToolFeatures();
+      applyToolFeatureVisibility();
+    });
   });
 }
 
@@ -773,7 +974,8 @@ function nodeHasSkeletonComponent(node) {
 }
 
 function updateSpineTraceToolVisibility(node) {
-  const visible = nodeHasSkeletonComponent(node);
+  const featureOn = isToolFeatureEnabled("spine-trace");
+  const visible = featureOn && nodeHasSkeletonComponent(node);
   spineTraceToolEl.hidden = !visible;
   if (!visible) {
     spineAnimationInputEl.value = "";
@@ -782,6 +984,62 @@ function updateSpineTraceToolVisibility(node) {
     spineAnimationSuggestionListEl.innerHTML = "";
     spineAnimationNames = [];
   }
+}
+
+function registerNodeBreakFromUI() {
+  const uuid = String(selectedUuid || "").trim();
+  const eventType = (breakEventTypeEl.value || "").trim();
+  if (!uuid) {
+    setToolStatus("Select a node first.", "error");
+    return;
+  }
+  if (!eventType) {
+    setToolStatus("Select a break event type.", "error");
+    return;
+  }
+  evalInPage(EVAL_REGISTER_NODE_BREAK(uuid, eventType), (result, err) => {
+    if (err || !result?.ok) {
+      setToolStatus(result?.error || err || "Failed to register break.", "error");
+      return;
+    }
+    renderNodeBreakList(result.breaks || []);
+    const node = hierarchy?.tree ? findNode(hierarchy.tree, uuid) : null;
+    const targetLabel = node ? `${node.name || "(unnamed)"} · ${uuid}` : uuid;
+    setToolStatus(
+      result.added
+        ? `Break added: ${formatBreakEventType(eventType)} @ ${targetLabel}`
+        : `Break already exists: ${formatBreakEventType(eventType)} @ ${targetLabel}`,
+      "ok"
+    );
+  });
+}
+
+function clearNodeBreaksFromUI() {
+  evalInPage(EVAL_CLEAR_NODE_BREAKS, (result, err) => {
+    if (err || !result?.ok) {
+      setToolStatus(result?.error || err || "Failed to clear breaks.", "error");
+      return;
+    }
+    renderNodeBreakList(result.breaks || []);
+    setToolStatus(`Cleared ${result.cleared || 0} node break(s).`, "ok");
+  });
+}
+
+function clearOneNodeBreak(uuid, eventType) {
+  evalInPage(EVAL_CLEAR_ONE_NODE_BREAK(uuid, eventType), (result, err) => {
+    if (err || !result?.ok) {
+      setToolStatus(result?.error || err || "Failed to clear break.", "error");
+      return;
+    }
+    renderNodeBreakList(result.breaks || []);
+    const targetLabel = uuid === "*" ? "all nodes" : uuid;
+    setToolStatus(
+      result.cleared
+        ? `Removed break: ${formatBreakEventType(eventType)} @ ${targetLabel}`
+        : "Break not found.",
+      result.cleared ? "ok" : "error"
+    );
+  });
 }
 
 function renderSpineAnimationSuggestions(filterText = "") {
@@ -967,6 +1225,7 @@ function focusReferenceHolder(nodeUuid) {
     selectedUuid = nodeUuid;
     refUuidInputEl.value = nodeUuid;
     updateSpineTraceToolVisibility(node);
+    updateBreakNodeTargetLabel(node);
     evalInPage(EVAL_SELECT(nodeUuid), () => {});
     nodePropertiesStatus = "loading";
     renderDetail(node);
@@ -1191,6 +1450,7 @@ function selectNode(node) {
     nodePropertiesError = "";
   }
   updateSpineTraceToolVisibility(node);
+  updateBreakNodeTargetLabel(node);
   evalInPage(EVAL_SELECT(node.uuid), () => {});
   nodePropertiesStatus = "loading";
   renderDetail(node);
@@ -1759,6 +2019,7 @@ function refresh() {
       const node = findNode(hierarchy.tree, selectedUuid);
       if (node) {
         updateSpineTraceToolVisibility(node);
+        updateBreakNodeTargetLabel(node);
         if (isDetailInteractionLocked()) {
           detailRefreshPending = true;
         } else {
@@ -1779,9 +2040,11 @@ function refresh() {
         nodePropertiesStatus = "idle";
         nodePropertiesError = "";
         updateSpineTraceToolVisibility(null);
+        updateBreakNodeTargetLabel(null);
       }
     } else {
       updateSpineTraceToolVisibility(null);
+      updateBreakNodeTargetLabel(null);
     }
 
     renderTree();
@@ -1899,6 +2162,8 @@ clearSpineTraceBtn.addEventListener("click", () => {
     setToolStatus(result.message || "Spine trace cleared.", "ok");
   });
 });
+addNodeBreakBtn.addEventListener("click", registerNodeBreakFromUI);
+clearNodeBreaksBtn.addEventListener("click", clearNodeBreaksFromUI);
 spineAnimationInputEl.addEventListener("focus", loadSpineAnimationSuggestions);
 spineAnimationInputEl.addEventListener("input", () => {
   if (!spineAnimationNames.length) return;
@@ -1945,11 +2210,14 @@ function connectPort() {
 connectPort();
 initTheme();
 initToolsPanelToggle();
+initToolFeatureSettings();
 initToolsPanelResizer();
 loadMarkedNodes();
 setBuildNote();
 syncGameSpeedFromPage();
 syncPauseStateFromPage();
 updateSpineTraceToolVisibility(null);
+updateBreakNodeTargetLabel(null);
+refreshNodeBreakList();
 refresh();
 startAutoRefresh();
