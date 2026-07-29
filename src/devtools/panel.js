@@ -61,8 +61,10 @@ const TOOLS_MIN_WIDTH = 260;
 const TOOLS_MAX_WIDTH = 700;
 const THEME_STORAGE_KEY = "animtracer-theme-preference";
 const TOOLS_PANEL_STORAGE_KEY = "animtracer-tools-panel-open";
+const MARKED_NODES_STORAGE_KEY = "animtracer-marked-node-uuids";
 
 let themePreference = "auto";
+let markedNodeUuids = new Set();
 
 function devToolsThemeToPanel(theme) {
   return theme === "dark" ? "dark" : "light";
@@ -976,6 +978,53 @@ function updateClearFiltersButton() {
   clearFiltersBtn.hidden = !hasActiveFilters();
 }
 
+function loadMarkedNodes() {
+  try {
+    const raw = localStorage.getItem(MARKED_NODES_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    markedNodeUuids = new Set(
+      parsed
+        .map((uuid) => String(uuid || "").trim())
+        .filter(Boolean)
+    );
+  } catch {}
+}
+
+function saveMarkedNodes() {
+  try {
+    localStorage.setItem(MARKED_NODES_STORAGE_KEY, JSON.stringify([...markedNodeUuids]));
+  } catch {}
+}
+
+function isMarkedNode(uuid) {
+  return markedNodeUuids.has(String(uuid || "").trim());
+}
+
+function toggleMarkedNode(uuid) {
+  const id = String(uuid || "").trim();
+  if (!id) return false;
+  let marked = false;
+  if (markedNodeUuids.has(id)) {
+    markedNodeUuids.delete(id);
+    marked = false;
+  } else {
+    markedNodeUuids.add(id);
+    marked = true;
+  }
+  saveMarkedNodes();
+  return marked;
+}
+
+function ensureExpandedForMarkedNode(root) {
+  if (!root || !markedNodeUuids.size) return;
+  expansionMode = "default";
+  for (const uuid of markedNodeUuids) {
+    expandPathToNode(root, uuid);
+  }
+}
+
 function renderTree() {
   treeEl.innerHTML = "";
 
@@ -989,6 +1038,7 @@ function renderTree() {
     resetExpansionForFilters();
     applyFilterExpansion();
   }
+  ensureExpandedForMarkedNode(hierarchy.tree);
 
   const visible = nodeMatchesTree(hierarchy.tree);
   if (!visible) {
@@ -1015,6 +1065,7 @@ function renderNode(node, depth, container) {
   const hasChildren = node.children.length > 0;
   const isExpanded = isNodeExpanded(node, depth);
   const isSelected = selectedUuid === node.uuid;
+  const isMarked = isMarkedNode(node.uuid);
   const isDirectMatch = hasActiveFilters() && nodeMatchesSelf(node);
   const matchedComponents = getMatchingComponents(node);
 
@@ -1027,6 +1078,7 @@ function renderNode(node, depth, container) {
   if (!node.activeInHierarchy) row.classList.add("inactive");
   if (node.isSpine) row.classList.add("spine");
   if (isSelected) row.classList.add("selected");
+  if (isMarked) row.classList.add("marked-highlight");
   if (isDirectMatch) row.classList.add("filter-match");
   if (highlightedReferenceNodeUuid === node.uuid) row.classList.add("reference-highlight");
   row.style.paddingLeft = `${depth * 12 + 4}px`;
@@ -1066,6 +1118,20 @@ function renderNode(node, depth, container) {
   row.appendChild(toggle);
   row.appendChild(icon);
   row.appendChild(name);
+
+  const markBtn = document.createElement("button");
+  markBtn.type = "button";
+  markBtn.className = `mark-toggle${isMarked ? " active" : ""}`;
+  markBtn.textContent = "★";
+  markBtn.title = isMarked ? "Unmark node" : "Mark node";
+  markBtn.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const marked = toggleMarkedNode(node.uuid);
+    setToolStatus(marked ? `Marked ${node.name}` : `Unmarked ${node.name}`, "ok");
+    renderTree();
+  });
+  row.appendChild(markBtn);
 
   if (matchedComponents.length) {
     for (const comp of matchedComponents) {
@@ -1687,6 +1753,7 @@ function refresh() {
     setStatus(`${result.sceneName} · CC ${result.engineVersion}`, "ok");
 
     updateComponentFilterOptions();
+    ensureExpandedForMarkedNode(hierarchy.tree);
 
     if (selectedUuid && hierarchy.tree) {
       const node = findNode(hierarchy.tree, selectedUuid);
@@ -1879,6 +1946,7 @@ connectPort();
 initTheme();
 initToolsPanelToggle();
 initToolsPanelResizer();
+loadMarkedNodes();
 setBuildNote();
 syncGameSpeedFromPage();
 syncPauseStateFromPage();

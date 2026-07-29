@@ -645,6 +645,14 @@ body.resizing {
   background: var(--reference-highlight-bg);
 }
 
+.tree-row.marked-highlight {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.tree-row.marked-highlight .node-name {
+  font-weight: 600;
+}
+
 .toggle {
   width: 18px;
   flex-shrink: 0;
@@ -712,6 +720,27 @@ body.resizing {
   background: var(--bg3);
   color: var(--text-dim);
   font-size: 10px;
+}
+
+.mark-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.mark-toggle:hover {
+  color: var(--warning);
+  background: var(--accent-bg);
+}
+
+.mark-toggle.active {
+  color: var(--warning);
 }
 
 .node-badge.spine {
