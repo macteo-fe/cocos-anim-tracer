@@ -66,7 +66,8 @@ let detailRenderTimer = null;
 let detailPointerActive = false;
 let detailRefreshPending = false;
 const TOOLS_MIN_WIDTH = 260;
-const TOOLS_MAX_WIDTH = 700;
+const TREE_MIN_WIDTH = 300;
+const TREE_MAX_WIDTH = 900;
 const THEME_STORAGE_KEY = "animtracer-theme-preference";
 const TOOLS_PANEL_STORAGE_KEY = "animtracer-tools-panel-open";
 const TOOL_FEATURES_STORAGE_KEY = "animtracer-tool-features";
@@ -867,13 +868,23 @@ function initToolFeatureSettings() {
 function initToolsPanelResizer() {
   let isDragging = false;
 
+  const applyTreeWidth = (width) => {
+    document.documentElement.style.setProperty("--tree-width", `${Math.round(width)}px`);
+  };
+
+  const clampTreeWidth = (desired, layoutWidth) => {
+    const maxAllowed = Math.max(TREE_MIN_WIDTH, layoutWidth - TOOLS_MIN_WIDTH - 6);
+    return Math.min(Math.max(desired, TREE_MIN_WIDTH), Math.min(TREE_MAX_WIDTH, maxAllowed));
+  };
+
+  // Start hierarchy at its minimum width.
+  applyTreeWidth(TREE_MIN_WIDTH);
+
   const onPointerMove = (event) => {
     if (!isDragging) return;
     const rect = layoutEl.getBoundingClientRect();
-    const rightSideWidth = rect.right - event.clientX;
-    const maxAllowed = Math.max(TOOLS_MIN_WIDTH, rect.width - 220);
-    const width = Math.min(Math.max(rightSideWidth, TOOLS_MIN_WIDTH), Math.min(TOOLS_MAX_WIDTH, maxAllowed));
-    document.documentElement.style.setProperty("--tools-width", `${Math.round(width)}px`);
+    const leftSideWidth = event.clientX - rect.left;
+    applyTreeWidth(clampTreeWidth(leftSideWidth, rect.width));
   };
 
   const onPointerUp = () => {
