@@ -1,5 +1,5 @@
 (function () {
-  const BRIDGE_VERSION = 14;
+  const BRIDGE_VERSION = 16;
   // Always refresh bridge API so extension reloads apply even if an older
   // inject already set window.__cocosHierarchyBridge__.
 
@@ -14,15 +14,46 @@
   ]);
   const NODE_BREAK_HOOK_VERSION = 2;
   let bridgePaused = false;
+  let bridgeGameSpeed = 1;
   try {
     const prev = window.__cocosHierarchyBridge__?.getPauseState?.();
     if (prev?.ok) bridgePaused = !!prev.paused;
+  } catch {}
+  try {
+    const prevSpeed = window.__cocosHierarchyBridge__?.getGameSpeed?.();
+    if (prevSpeed?.ok && Number.isFinite(Number(prevSpeed.speed))) {
+      bridgeGameSpeed = Number(prevSpeed.speed);
+    }
   } catch {}
 
   function getCocos() {
     if (window.cc?.director) return window.cc;
     if (window.cocos?.director) return window.cocos;
     return null;
+  }
+
+  function getEngineMajorVersion(cc = getCocos()) {
+    const raw =
+      cc?.ENGINE_VERSION ||
+      cc?.engine?.version ||
+      window.CC_ENGINE_VERSION ||
+      "";
+    const match = String(raw).match(/(\d+)/);
+    if (match) return Number(match[1]);
+
+    // Heuristics when version string is missing.
+    try {
+      if (typeof cc?.director?.tick === "function") return 3;
+    } catch {}
+    try {
+      if (typeof cc?.director?.getScheduler === "function") return 2;
+    } catch {}
+    return 0;
+  }
+
+  function isCocos2x(cc = getCocos()) {
+    const major = getEngineMajorVersion(cc);
+    return major > 0 && major < 3;
   }
 
   function getPosition(node) {
@@ -1042,18 +1073,108 @@
     return { ok: true, names: Array.from(names).filter(Boolean).sort() };
   }
 
-  function setGameSpeed(speed) {
-    const cc = getCocos();
+  function applySpineTimeScale(cc, numericSpeed) {
+    const spNs = cc?.sp || window.sp || null;
+    if (!spNs) return { applied: false, method: "" };
+
+    // Global Spine playback rate (separate from scheduler timeScale).
+    try {
+      if ("timeScale" in spNs) {
+        if (spNs.__animTracerBaseTimeScale == null) {
+          const current = Number(spNs.timeScale);
+          spNs.__animTracerBaseTimeScale = Number.isFinite(current) ? current : 1;
+        }
+        spNs.timeScale = (spNs.__animTracerBaseTimeScale || 1) * numericSpeed;
+        return { applied: true, method: "sp.timeScale" };
+      }
+    } catch {}
+
+    // Fallback: scale dt inside Skeleton.update without overwriting per-skeleton timeScale.
+    const Skeleton = spNs.Skeleton;
+    const proto = Skeleton?.prototype;
+    if (proto && typeof proto.update === "function") {
+      if (!proto.__animTracerOriginalUpdate) {
+        proto.__animTracerOriginalUpdate = proto.update;
+        proto.update = function (dt) {
+          const mul = bridgeGameSpeed || 1;
+          return proto.__animTracerOriginalUpdate.call(this, dt * mul);
+        };
+        proto.__animTracerOriginalUpdate.__animTracerWrapped = true;
+      }
+      return { applied: true, method: "Skeleton.update" };
+    }
+
+    return { applied: false, method: "" };
+  }
+
+  function setGameSpeedCocos2x(cc, numericSpeed) {
+    const director = cc?.director;
+    const methods = [];
+    let ok = false;
+
+    const scheduler =
+      (typeof director?.getScheduler === "function" ? director.getScheduler() : null) ||
+      director?._scheduler ||
+      null;
+
+    if (scheduler && typeof scheduler.setTimeScale === "function") {
+      scheduler.setTimeScale(numericSpeed);
+      methods.push("scheduler.setTimeScale");
+      ok = true;
+    }
+
+    // Spine in CC2.x often does NOT follow scheduler timeScale (especially cache /
+    // custom update paths). It uses sp.timeScale / skeleton update instead.
+    const spineResult = applySpineTimeScale(cc, numericSpeed);
+    if (spineResult.applied) {
+      methods.push(spineResult.method);
+      ok = true;
+    }
+
+    if (!ok) {
+      const game = cc?.game;
+      if (game && typeof game.update === "function" && !game.__animTracerOriginalUpdate) {
+        game.__animTracerOriginalUpdate = game.update.bind(game);
+        game.update = function (dt) {
+          return game.__animTracerOriginalUpdate(dt * (bridgeGameSpeed || 1));
+        };
+      }
+      if (game?.__animTracerOriginalUpdate) {
+        methods.push("game.update");
+        ok = true;
+      }
+    }
+
+    if (!ok) {
+      return { ok: false, error: "Cocos 2.x game speed APIs not available" };
+    }
+
+    bridgeGameSpeed = numericSpeed;
+    if (director) director.__animTracerGameSpeed = numericSpeed;
+    return {
+      ok: true,
+      speed: numericSpeed,
+      engine: "2.x",
+      method: methods.join(" + "),
+    };
+  }
+
+  function setGameSpeedCocos3x(cc, numericSpeed) {
     const director = cc?.director;
     if (!director) return { ok: false, error: "Cocos director not found" };
 
-    const numericSpeed = Number(speed);
-    if (!Number.isFinite(numericSpeed) || numericSpeed <= 0) {
-      return { ok: false, error: "Speed must be greater than 0" };
-    }
-
     const originalTick = director._originalTick ?? director.tick?.bind(director);
     if (typeof originalTick !== "function") {
+      // Some 3.x builds expose scheduler time scale too.
+      const scheduler =
+        (typeof director.getScheduler === "function" ? director.getScheduler() : null) ||
+        director._scheduler;
+      if (scheduler && typeof scheduler.setTimeScale === "function") {
+        scheduler.setTimeScale(numericSpeed);
+        bridgeGameSpeed = numericSpeed;
+        director.__animTracerGameSpeed = numericSpeed;
+        return { ok: true, speed: numericSpeed, engine: "3.x", method: "scheduler.setTimeScale" };
+      }
       return { ok: false, error: "director.tick is not available" };
     }
 
@@ -1064,15 +1185,52 @@
     director.tick = (dt, ...args) => {
       originalTick(dt * numericSpeed, ...args);
     };
+    bridgeGameSpeed = numericSpeed;
     director.__animTracerGameSpeed = numericSpeed;
-    return { ok: true, speed: numericSpeed };
+    return { ok: true, speed: numericSpeed, engine: "3.x", method: "director.tick" };
+  }
+
+  function setGameSpeed(speed) {
+    const cc = getCocos();
+    if (!cc?.director) return { ok: false, error: "Cocos director not found" };
+
+    const numericSpeed = Number(speed);
+    if (!Number.isFinite(numericSpeed) || numericSpeed <= 0) {
+      return { ok: false, error: "Speed must be greater than 0" };
+    }
+
+    if (isCocos2x(cc)) {
+      return setGameSpeedCocos2x(cc, numericSpeed);
+    }
+    return setGameSpeedCocos3x(cc, numericSpeed);
   }
 
   function getGameSpeed() {
     const cc = getCocos();
     const director = cc?.director;
     if (!director) return { ok: false, speed: 1 };
-    return { ok: true, speed: director.__animTracerGameSpeed ?? 1 };
+
+    if (isCocos2x(cc)) {
+      try {
+        const scheduler =
+          (typeof director.getScheduler === "function" ? director.getScheduler() : null) ||
+          director._scheduler;
+        if (scheduler && typeof scheduler.getTimeScale === "function") {
+          const scale = Number(scheduler.getTimeScale());
+          if (Number.isFinite(scale) && scale > 0) {
+            bridgeGameSpeed = scale;
+            return { ok: true, speed: scale, engine: "2.x" };
+          }
+        }
+      } catch {}
+    }
+
+    const stored = Number(director.__animTracerGameSpeed ?? bridgeGameSpeed ?? 1);
+    return {
+      ok: true,
+      speed: Number.isFinite(stored) && stored > 0 ? stored : 1,
+      engine: isCocos2x(cc) ? "2.x" : "3.x",
+    };
   }
 
   function readPausedState(director) {
