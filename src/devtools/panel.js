@@ -244,7 +244,15 @@ const EVAL_GET_NODE_PROPS = (uuid) => `(() => {
     properties.push({ key: "name", rawKey: "name", type: "string", fields: null, value: String(resolved.name ?? "") });
   } catch {}
   try {
-    properties.push({ key: "active", rawKey: "active", type: "boolean", fields: null, value: !!resolved.active });
+    const isScene =
+      (cc?.Scene && resolved instanceof cc.Scene) ||
+      resolved === scene ||
+      resolved.isScene === true;
+    if (!isScene) {
+      const active =
+        typeof resolved._active === "boolean" ? resolved._active : resolved.active !== false;
+      properties.push({ key: "active", rawKey: "active", type: "boolean", fields: null, value: !!active });
+    }
   } catch {}
   try {
     let pos = resolved.position;
@@ -327,8 +335,15 @@ const EVAL_SET_NODE_PROP = (uuid, key, value) => `(() => {
       return { ok: true, key: propKey, type: "string", value: node.name };
     }
     if (propKey === "active") {
-      node.active = nextValue === true || nextValue === "true" || nextValue === 1 || nextValue === "1";
-      return { ok: true, key: propKey, type: "boolean", value: !!node.active };
+      const isScene =
+        (cc?.Scene && node instanceof cc.Scene) ||
+        node === scene ||
+        node.isScene === true;
+      if (isScene) return { ok: false, error: "Scene active cannot be changed" };
+      const next = nextValue === true || nextValue === "true" || nextValue === 1 || nextValue === "1";
+      node.active = next;
+      const active = typeof node._active === "boolean" ? node._active : !!node.active;
+      return { ok: true, key: propKey, type: "boolean", value: !!active };
     }
     if (propKey === "layer" || propKey === "angle") {
       const n = Number(nextValue);

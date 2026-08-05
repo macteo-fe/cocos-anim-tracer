@@ -1,5 +1,5 @@
 (function () {
-  const BRIDGE_VERSION = 16;
+  const BRIDGE_VERSION = 17;
   // Always refresh bridge API so extension reloads apply even if an older
   // inject already set window.__cocosHierarchyBridge__.
 
@@ -56,6 +56,63 @@
     return major > 0 && major < 3;
   }
 
+  // CC2.x Scene overrides active/activeInHierarchy getters to log:
+  // '"active" is not defined in the Scene, it is only defined in normal nodes.'
+  // Never touch those public getters on Scene — use private fields or treat as always active.
+  function isSceneNode(node) {
+    if (!node) return false;
+    const cc = getCocos();
+    try {
+      if (cc?.Scene && (node instanceof cc.Scene || node.constructor === cc.Scene)) return true;
+    } catch {}
+    try {
+      if (node.isScene === true) return true;
+    } catch {}
+    try {
+      const scene = cc?.director?.getScene?.();
+      if (scene && node === scene) return true;
+    } catch {}
+    return false;
+  }
+
+  function readNodeActive(node) {
+    if (!node) return false;
+    if (isSceneNode(node)) return true;
+    // Prefer private field — safe if a Scene slipped past detection.
+    if (typeof node._active === "boolean") return node._active;
+    try {
+      return node.active !== false;
+    } catch {
+      return true;
+    }
+  }
+
+  function readNodeActiveInHierarchy(node) {
+    if (!node) return false;
+    if (isSceneNode(node)) return true;
+    if (typeof node._activeInHierarchy === "boolean") return node._activeInHierarchy;
+    try {
+      if (node.activeInHierarchy !== undefined) return !!node.activeInHierarchy;
+    } catch {}
+    return readNodeActive(node);
+  }
+
+  function writeNodeActive(node, active) {
+    if (!node) return false;
+    if (isSceneNode(node)) return true;
+    const next = !!active;
+    try {
+      node.active = next;
+    } catch {
+      try {
+        node._active = next;
+      } catch {
+        return readNodeActive(node);
+      }
+    }
+    return readNodeActive(node);
+  }
+
   function getPosition(node) {
     if (node.position) {
       return { x: node.position.x, y: node.position.y, z: node.position.z || 0 };
@@ -100,9 +157,8 @@
     return {
       uuid,
       name: node.name || "(unnamed)",
-      active: node.active !== false,
-      activeInHierarchy:
-        node.activeInHierarchy !== undefined ? node.activeInHierarchy : node.active !== false,
+      active: readNodeActive(node),
+      activeInHierarchy: readNodeActiveInHierarchy(node),
       position: getPosition(node),
       layer: node.layer ?? 0,
       components,
@@ -596,7 +652,8 @@
         push("name", String(node.name ?? ""));
       } catch {}
       try {
-        push("active", !!node.active);
+        // Scene has no meaningful active toggle in CC2.x — skip to avoid engine errors.
+        if (!isSceneNode(node)) push("active", readNodeActive(node));
       } catch {}
 
       try {
@@ -649,8 +706,11 @@
         return { ok: true, key: propKey, type: "string", value: node.name };
       }
       if (propKey === "active") {
-        node.active = value === true || value === "true" || value === 1 || value === "1";
-        return { ok: true, key: propKey, type: "boolean", value: !!node.active };
+        if (isSceneNode(node)) {
+          return { ok: false, error: "Scene active cannot be changed" };
+        }
+        const next = value === true || value === "true" || value === 1 || value === "1";
+        return { ok: true, key: propKey, type: "boolean", value: writeNodeActive(node, next) };
       }
       if (propKey === "layer") {
         const n = Number(value);
@@ -708,15 +768,15 @@
   function toggleActive(uuid) {
     const node = getNodeByUuid(uuid);
     if (!node) return false;
-    node.active = !node.active;
-    return node.active;
+    if (isSceneNode(node)) return true;
+    return writeNodeActive(node, !readNodeActive(node));
   }
 
   function setActive(uuid, active) {
     const node = getNodeByUuid(uuid);
     if (!node) return false;
-    node.active = !!active;
-    return node.active;
+    if (isSceneNode(node)) return true;
+    return writeNodeActive(node, !!active);
   }
 
   function getNodePath(node) {
@@ -1467,6 +1527,7 @@
     });
 
     wrapProtoSetter("active", function (prev, next) {
+      if (isSceneNode(this)) return;
       const prevActive = !!prev;
       const nextActive = !!next;
       if (prevActive === nextActive) return;
