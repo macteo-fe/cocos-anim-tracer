@@ -1,5 +1,5 @@
 (function () {
-  const BRIDGE_VERSION = 17;
+  const BRIDGE_VERSION = 18;
   // Always refresh bridge API so extension reloads apply even if an older
   // inject already set window.__cocosHierarchyBridge__.
 
@@ -114,10 +114,7 @@
   }
 
   function getPosition(node) {
-    if (node.position) {
-      return { x: node.position.x, y: node.position.y, z: node.position.z || 0 };
-    }
-    return { x: node.x ?? 0, y: node.y ?? 0, z: node.z ?? 0 };
+    return readNodePosition(node);
   }
 
   function getComponentNames(node) {
@@ -240,7 +237,152 @@
     "right",
     "__scriptAsset",
     "__prefab",
+    // CC2.1+ deprecated Node getters — reading them spams console warnings.
+    "rotation",
+    "rotationX",
+    "rotationY",
+    "_rotationX",
+    "_rotationY",
+    "skewX",
+    "skewY",
   ]);
+
+  function copyVec3Like(value, fallback = { x: 0, y: 0, z: 0 }) {
+    if (!value || typeof value !== "object") return { ...fallback };
+    const x = Number(value.x);
+    const y = Number(value.y);
+    const z = Number(value.z);
+    return {
+      x: Number.isFinite(x) ? x : fallback.x,
+      y: Number.isFinite(y) ? y : fallback.y,
+      z: Number.isFinite(z) ? z : fallback.z,
+    };
+  }
+
+  // Prefer private transform storage on CC2.x — public rotationX/Y/rotation getters warn since v2.1.0.
+  function readNodePosition(node) {
+    if (!node) return { x: 0, y: 0, z: 0 };
+    try {
+      if (node._position && typeof node._position === "object") {
+        return copyVec3Like(node._position);
+      }
+    } catch {}
+    try {
+      if (typeof node.getPosition === "function") {
+        const out = makeVec3(0, 0, 0);
+        const ret = node.getPosition(out) || out;
+        if (ret && typeof ret === "object") return copyVec3Like(ret);
+      }
+    } catch {}
+    try {
+      const pos = node.position;
+      if (pos && typeof pos === "object") return copyVec3Like(pos);
+    } catch {}
+    return {
+      x: Number(node.x) || 0,
+      y: Number(node.y) || 0,
+      z: Number(node.z) || 0,
+    };
+  }
+
+  function readNodeScale(node) {
+    if (!node) return { x: 1, y: 1, z: 1 };
+    try {
+      if (node._scale && typeof node._scale === "object") {
+        return copyVec3Like(node._scale, { x: 1, y: 1, z: 1 });
+      }
+    } catch {}
+    try {
+      // CC3: node.scale is Vec3. CC2: node.scale is a number (scaleX) — ignore that.
+      const scale = node.scale;
+      if (scale && typeof scale === "object") return copyVec3Like(scale, { x: 1, y: 1, z: 1 });
+    } catch {}
+    try {
+      if (typeof node.getScale === "function") {
+        const out = makeVec3(1, 1, 1);
+        const ret = node.getScale(out);
+        if (ret && typeof ret === "object") return copyVec3Like(ret, { x: 1, y: 1, z: 1 });
+      }
+    } catch {}
+    try {
+      const sx = Number(node.scaleX);
+      const sy = Number(node.scaleY);
+      const sz = Number(node.scaleZ);
+      if (Number.isFinite(sx) || Number.isFinite(sy) || Number.isFinite(sz)) {
+        return {
+          x: Number.isFinite(sx) ? sx : 1,
+          y: Number.isFinite(sy) ? sy : 1,
+          z: Number.isFinite(sz) ? sz : 1,
+        };
+      }
+    } catch {}
+    return { x: 1, y: 1, z: 1 };
+  }
+
+  function readNodeEulerAngles(node) {
+    if (!node) return null;
+    try {
+      if (node._eulerAngles && typeof node._eulerAngles === "object") {
+        return copyVec3Like(node._eulerAngles);
+      }
+    } catch {}
+    try {
+      // Only use public eulerAngles when it is a real vec object.
+      // Never fall back to rotationX/rotationY — those warn on CC2.1+.
+      const euler = node.eulerAngles;
+      if (euler && typeof euler === "object") return copyVec3Like(euler);
+    } catch {}
+    return null;
+  }
+
+  function readNodeAngle(node) {
+    if (!node) return null;
+    try {
+      if (node._eulerAngles && typeof node._eulerAngles.z === "number") {
+        return node._eulerAngles.z;
+      }
+    } catch {}
+    try {
+      if (typeof node.angle === "number") return node.angle;
+    } catch {}
+    return null;
+  }
+
+  function writeNodeEulerAngles(node, next) {
+    if (!node || !next) return false;
+    const x = Number(next.x) || 0;
+    const y = Number(next.y) || 0;
+    const z = Number(next.z) || 0;
+    try {
+      if (typeof node.setRotationFromEuler === "function") {
+        node.setRotationFromEuler(x, y, z);
+        return true;
+      }
+    } catch {}
+    try {
+      if (node.eulerAngles && typeof node.eulerAngles === "object") {
+        writeStructuredValue(node.eulerAngles, { x, y, z }, ["x", "y", "z"]);
+        try {
+          node.eulerAngles = node.eulerAngles;
+        } catch {}
+        return true;
+      }
+    } catch {}
+    try {
+      if (node._eulerAngles && typeof node._eulerAngles === "object") {
+        node._eulerAngles.x = x;
+        node._eulerAngles.y = y;
+        node._eulerAngles.z = z;
+        if (typeof node._fromEuler === "function") node._fromEuler();
+        return true;
+      }
+    } catch {}
+    try {
+      node.angle = z;
+      return true;
+    } catch {}
+    return false;
+  }
 
   function getComponentDisplayName(comp) {
     const ctorName = comp?.constructor?.name || "";
@@ -268,6 +410,11 @@
 
   function readTargetProp(target, key) {
     try {
+      const displayKey = key[0] === "_" ? key.slice(1) : key;
+      if (EDITABLE_SKIP_KEYS.has(key) || EDITABLE_SKIP_KEYS.has(displayKey)) {
+        return { ok: false };
+      }
+
       if (Object.prototype.hasOwnProperty.call(target, key)) {
         const desc = Object.getOwnPropertyDescriptor(target, key);
         if (desc && "value" in desc) return { ok: true, value: desc.value, rawKey: key };
@@ -276,7 +423,10 @@
       if (privateKey && Object.prototype.hasOwnProperty.call(target, privateKey)) {
         return { ok: true, value: target[privateKey], rawKey: privateKey };
       }
+
+      // Last resort: public accessor. Skipped keys above block CC2 Node rotationX/Y/rotation.
       const value = target[key];
+      if (value === undefined && !(key in target)) return { ok: false };
       return { ok: true, value, rawKey: key };
     } catch {
       return { ok: false };
@@ -620,16 +770,6 @@
     };
   }
 
-  function readNodeVec3(node, key, fallback = { x: 0, y: 0, z: 0 }) {
-    try {
-      const value = node[key];
-      if (value && typeof value === "object") {
-        return pickNumericFields(value, ["x", "y", "z"]);
-      }
-    } catch {}
-    return { ...fallback };
-  }
-
   function getNodeProperties(uuid) {
     try {
       const node = getNodeByUuid(uuid);
@@ -657,31 +797,25 @@
       } catch {}
 
       try {
-        if (node.position) push("position", node.position);
-        else if (typeof node.getPosition === "function") {
-          const p = node.getPosition();
-          push("position", p || readNodeVec3(node, "position"));
-        } else {
-          push("position", { x: node.x ?? 0, y: node.y ?? 0, z: node.z ?? 0 });
-        }
+        push("position", readNodePosition(node));
       } catch {
         push("position", { x: 0, y: 0, z: 0 });
       }
 
       try {
-        if (node.scale) push("scale", node.scale);
-        else if (typeof node.getScale === "function") push("scale", node.getScale());
-        else push("scale", { x: 1, y: 1, z: 1 });
+        push("scale", readNodeScale(node));
       } catch {
         push("scale", { x: 1, y: 1, z: 1 });
       }
 
       try {
-        if (node.eulerAngles) push("eulerAngles", node.eulerAngles);
+        const euler = readNodeEulerAngles(node);
+        if (euler) push("eulerAngles", euler);
       } catch {}
 
       try {
-        if (typeof node.angle === "number") push("angle", node.angle);
+        const angle = readNodeAngle(node);
+        if (typeof angle === "number") push("angle", angle);
       } catch {}
 
       try {
@@ -721,32 +855,39 @@
       if (propKey === "angle") {
         const n = Number(value);
         if (!Number.isFinite(n)) return { ok: false, error: "Invalid number" };
-        node.angle = n;
-        return { ok: true, key: propKey, type: "number", value: node.angle };
+        try {
+          node.angle = n;
+        } catch {
+          try {
+            if (node._eulerAngles) {
+              node._eulerAngles.z = n;
+              if (typeof node._fromEuler === "function") node._fromEuler();
+            }
+          } catch {}
+        }
+        return { ok: true, key: propKey, type: "number", value: readNodeAngle(node) ?? n };
       }
       if (propKey === "position" || propKey === "scale" || propKey === "eulerAngles") {
         const fields = ["x", "y", "z"];
         const next = pickNumericFields(value || {}, fields);
         if (propKey === "position") {
           if (typeof node.setPosition === "function") node.setPosition(next.x, next.y, next.z);
-          else if (node.position) writeStructuredValue(node.position, next, fields);
-          else {
+          else if (node._position) writeStructuredValue(node._position, next, fields);
+          else if (node.position && typeof node.position === "object") {
+            writeStructuredValue(node.position, next, fields);
+          } else {
             node.x = next.x;
             node.y = next.y;
             node.z = next.z;
           }
         } else if (propKey === "scale") {
           if (typeof node.setScale === "function") node.setScale(next.x, next.y, next.z);
-          else if (node.scale) writeStructuredValue(node.scale, next, fields);
-        } else if (propKey === "eulerAngles") {
-          if (typeof node.setRotationFromEuler === "function") {
-            node.setRotationFromEuler(next.x, next.y, next.z);
-          } else if (node.eulerAngles) {
-            writeStructuredValue(node.eulerAngles, next, fields);
-            try {
-              node.eulerAngles = node.eulerAngles;
-            } catch {}
+          else if (node._scale) writeStructuredValue(node._scale, next, fields);
+          else if (node.scale && typeof node.scale === "object") {
+            writeStructuredValue(node.scale, next, fields);
           }
+        } else if (propKey === "eulerAngles") {
+          writeNodeEulerAngles(node, next);
         }
         const latest = getNodeProperties(uuid);
         const prop = latest.properties?.find((item) => item.key === propKey);
@@ -818,7 +959,12 @@
       key === "_persistNode" ||
       key === "pos" ||
       key === "rot" ||
-      key === "scale"
+      key === "scale" ||
+      key === "rotation" ||
+      key === "rotationX" ||
+      key === "rotationY" ||
+      key === "_rotationX" ||
+      key === "_rotationY"
     ) {
       return true;
     }

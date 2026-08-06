@@ -255,16 +255,34 @@ const EVAL_GET_NODE_PROPS = (uuid) => `(() => {
     }
   } catch {}
   try {
-    let pos = resolved.position;
-    if (!pos && typeof resolved.getPosition === "function") pos = resolved.getPosition();
-    if (!pos) pos = { x: resolved.x ?? 0, y: resolved.y ?? 0, z: resolved.z ?? 0 };
+    let pos = resolved._position;
+    if (!pos || typeof pos !== "object") {
+      if (typeof resolved.getPosition === "function") {
+        const out = { x: 0, y: 0, z: 0 };
+        pos = resolved.getPosition(out) || out;
+      }
+    }
+    if (!pos || typeof pos !== "object") {
+      const pub = resolved.position;
+      pos = pub && typeof pub === "object" ? pub : { x: resolved.x ?? 0, y: resolved.y ?? 0, z: resolved.z ?? 0 };
+    }
     properties.push({ key: "position", rawKey: "position", type: "vec3", fields: ["x", "y", "z"], value: asVec3(pos) });
   } catch {
     properties.push({ key: "position", rawKey: "position", type: "vec3", fields: ["x", "y", "z"], value: { x: 0, y: 0, z: 0 } });
   }
   try {
-    let scale = resolved.scale;
-    if (!scale && typeof resolved.getScale === "function") scale = resolved.getScale();
+    let scale = resolved._scale;
+    if (!scale || typeof scale !== "object") {
+      const pub = resolved.scale;
+      if (pub && typeof pub === "object") scale = pub;
+    }
+    if (!scale || typeof scale !== "object") {
+      if (typeof resolved.getScale === "function") {
+        const out = { x: 1, y: 1, z: 1 };
+        const ret = resolved.getScale(out);
+        if (ret && typeof ret === "object") scale = ret;
+      }
+    }
     properties.push({
       key: "scale",
       rawKey: "scale",
@@ -276,19 +294,29 @@ const EVAL_GET_NODE_PROPS = (uuid) => `(() => {
     properties.push({ key: "scale", rawKey: "scale", type: "vec3", fields: ["x", "y", "z"], value: { x: 1, y: 1, z: 1 } });
   }
   try {
-    if (resolved.eulerAngles) {
+    // Prefer _eulerAngles — public rotationX/Y warn on CC2.1+.
+    const euler =
+      (resolved._eulerAngles && typeof resolved._eulerAngles === "object" && resolved._eulerAngles) ||
+      (resolved.eulerAngles && typeof resolved.eulerAngles === "object" && resolved.eulerAngles) ||
+      null;
+    if (euler) {
       properties.push({
         key: "eulerAngles",
         rawKey: "eulerAngles",
         type: "vec3",
         fields: ["x", "y", "z"],
-        value: asVec3(resolved.eulerAngles),
+        value: asVec3(euler),
       });
     }
   } catch {}
   try {
-    if (typeof resolved.angle === "number") {
-      properties.push({ key: "angle", rawKey: "angle", type: "number", fields: null, value: resolved.angle });
+    const angle =
+      (resolved._eulerAngles && typeof resolved._eulerAngles.z === "number"
+        ? resolved._eulerAngles.z
+        : null) ??
+      (typeof resolved.angle === "number" ? resolved.angle : null);
+    if (typeof angle === "number") {
+      properties.push({ key: "angle", rawKey: "angle", type: "number", fields: null, value: angle });
     }
   } catch {}
   try {
@@ -364,7 +392,14 @@ const EVAL_SET_NODE_PROP = (uuid, key, value) => `(() => {
         else if (node.scale) { node.scale.x = x; node.scale.y = y; node.scale.z = z; }
       } else if (propKey === "eulerAngles") {
         if (typeof node.setRotationFromEuler === "function") node.setRotationFromEuler(x, y, z);
-        else if (node.eulerAngles) { node.eulerAngles.x = x; node.eulerAngles.y = y; node.eulerAngles.z = z; }
+        else if (node.eulerAngles && typeof node.eulerAngles === "object") {
+          node.eulerAngles.x = x; node.eulerAngles.y = y; node.eulerAngles.z = z;
+        } else if (node._eulerAngles && typeof node._eulerAngles === "object") {
+          node._eulerAngles.x = x; node._eulerAngles.y = y; node._eulerAngles.z = z;
+          if (typeof node._fromEuler === "function") node._fromEuler();
+        } else {
+          node.angle = z;
+        }
       }
       return { ok: true, key: propKey, type: "vec3", fields: ["x", "y", "z"], value: { x, y, z } };
     }
@@ -407,8 +442,10 @@ const EVAL_FIND_REFS = (uuid) => `(() => {
       key === "constructor" || key === "prototype" ||
       key === "_id" || key === "_objFlags" || key === "_name" || key === "_enabled" ||
       key === "_parent" || key === "_children" || key === "_components" ||
-      key === "_scene" || key === "_eventProcessor" || key === "_persistNode" ||
-      key === "pos" || key === "rot" || key === "scale"
+      key === "_scene" || key === "_eventProcessor" ||       key === "_persistNode" ||
+      key === "pos" || key === "rot" || key === "scale" ||
+      key === "rotation" || key === "rotationX" || key === "rotationY" ||
+      key === "_rotationX" || key === "_rotationY"
     ) return true;
     if (depth === 0 && (key === "node" || key === "_node")) return true;
     return false;
