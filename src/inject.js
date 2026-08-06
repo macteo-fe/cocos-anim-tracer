@@ -1,5 +1,5 @@
 (function () {
-  const BRIDGE_VERSION = 18;
+  const BRIDGE_VERSION = 19;
   // Always refresh bridge API so extension reloads apply even if an older
   // inject already set window.__cocosHierarchyBridge__.
 
@@ -12,7 +12,7 @@
     "remove-child",
     "transform-change",
   ]);
-  const NODE_BREAK_HOOK_VERSION = 2;
+  const NODE_BREAK_HOOK_VERSION = 3;
   let bridgePaused = false;
   let bridgeGameSpeed = 1;
   try {
@@ -1610,8 +1610,6 @@
     if (!proto) return false;
     const hookedVersion = Number(proto.__animTracerNodeEventBreakHookVersion || 0);
     if (hookedVersion >= NODE_BREAK_HOOK_VERSION) return true;
-    proto.__animTracerNodeEventBreakHooked = true;
-    proto.__animTracerNodeEventBreakHookVersion = NODE_BREAK_HOOK_VERSION;
 
     function childInfo(child) {
       return {
@@ -1630,12 +1628,32 @@
         return result;
       };
       wrapped.__animTracerWrapped = true;
-      proto[methodName] = wrapped;
+      try {
+        proto[methodName] = wrapped;
+      } catch {
+        // Non-writable prototype methods (some CC2 builds).
+      }
     }
 
     function wrapProtoSetter(propName, onChange) {
-      const desc = Object.getOwnPropertyDescriptor(proto, propName);
+      // CC2 Class properties are often non-configurable (e.g. eulerAngles) — skip those.
+      let desc = Object.getOwnPropertyDescriptor(proto, propName);
+      let targetProto = proto;
+      if (!desc) {
+        // CC2 keeps some accessors on _BaseNode.prototype, not Node.prototype.
+        let parentProto = Object.getPrototypeOf(proto);
+        while (parentProto && parentProto !== Object.prototype) {
+          desc = Object.getOwnPropertyDescriptor(parentProto, propName);
+          if (desc) {
+            targetProto = parentProto;
+            break;
+          }
+          parentProto = Object.getPrototypeOf(parentProto);
+        }
+      }
       if (!desc || typeof desc.set !== "function" || desc.set.__animTracerWrapped) return;
+      if (desc.configurable === false) return;
+
       const origGet = desc.get;
       const origSet = desc.set;
       const wrappedSet = function (value) {
@@ -1646,12 +1664,16 @@
         return result;
       };
       wrappedSet.__animTracerWrapped = true;
-      Object.defineProperty(proto, propName, {
-        configurable: desc.configurable !== false,
-        enumerable: desc.enumerable,
-        get: origGet,
-        set: wrappedSet,
-      });
+      try {
+        Object.defineProperty(targetProto, propName, {
+          configurable: true,
+          enumerable: desc.enumerable,
+          get: origGet,
+          set: wrappedSet,
+        });
+      } catch {
+        // Property cannot be redefined on this engine build.
+      }
     }
 
     function transformsEqual(a, b) {
@@ -1854,6 +1876,8 @@
       });
     });
 
+    proto.__animTracerNodeEventBreakHooked = true;
+    proto.__animTracerNodeEventBreakHookVersion = NODE_BREAK_HOOK_VERSION;
     return true;
   }
 
