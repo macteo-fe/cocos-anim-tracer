@@ -983,9 +983,16 @@ body.resizing {
   margin-top: 8px;
 }
 
+.component-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 2px 4px 2px 0;
+}
+
 .detail .component {
   display: inline-block;
-  margin: 2px 4px 2px 0;
+  margin: 0;
   padding: 2px 6px;
   border: 1px solid transparent;
   border-radius: 3px;
@@ -1008,6 +1015,83 @@ body.resizing {
 .detail .component.selected {
   border-color: var(--accent);
   background: var(--accent-bg);
+}
+
+.component-bones-btn {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--spine-bg);
+  color: var(--spine);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.component-bones-btn:hover,
+.component-bones-btn.active {
+  border-color: var(--spine);
+  background: var(--spine);
+  color: #fff;
+}
+
+.bone-tree-panel {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+}
+
+.bone-tree-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.bone-tree-header h2 {
+  margin: 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+.bone-tree-header button {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.bone-tree-header button:hover {
+  border-color: var(--border);
+  background: var(--bg3);
+  color: var(--text);
+}
+
+.bone-tree {
+  max-height: 240px;
+  overflow: auto;
+  padding: 4px 0;
+}
+
+.bone-tree.empty {
+  padding: 10px 8px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.bone-row:hover > .node-name {
+  color: var(--spine);
 }
 
 .component-props {

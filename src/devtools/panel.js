@@ -45,6 +45,13 @@ let lastFilterKey = "";
 let nameFilter = "";
 let componentFilter = "";
 let refreshTimer = null;
+let refreshInFlight = false;
+let refreshQueued = false;
+let lastHierarchyRaw = "";
+let lastNodePropsRaw = "";
+let lastNodePropsUuid = "";
+let lastComponentPropsRaw = "";
+let lastComponentPropsKey = "";
 let port = null;
 let referenceResults = [];
 let highlightedReferenceNodeUuid = null;
@@ -58,6 +65,17 @@ let componentPropertiesName = "";
 let nodeProperties = [];
 let nodePropertiesStatus = "idle"; // idle | loading | ready | error
 let nodePropertiesError = "";
+let boneTreeOpen = false;
+let boneTreeUuid = null;
+let boneTreeComponentIndex = null;
+let boneTree = [];
+let boneTreeCount = 0;
+let boneTreeStatus = "idle"; // idle | loading | ready | error
+let boneTreeError = "";
+let boneTreeCollapsed = new Set();
+let hoverBoneName = null;
+let hoverBoneTimer = null;
+let clearBoneTimer = null;
 let componentPropListHeight = null;
 let componentPropListResizing = false;
 let componentPropListScrollTop = 0;
@@ -200,371 +218,39 @@ const EVAL_SET_COMPONENT_PROP = (uuid, componentIndex, key, value) => `(() => {
 })()`;
 
 const EVAL_GET_NODE_PROPS = (uuid) => `(() => {
-  const targetUuid = ${JSON.stringify(uuid)};
   const bridge = window.__cocosHierarchyBridge__;
-  if (bridge && typeof bridge.getNodeProperties === "function") {
-    try {
-      return bridge.getNodeProperties(targetUuid);
-    } catch (err) {
-      return { ok: false, error: err?.message || String(err), properties: [] };
-    }
-  }
-
-  const cc = window.cc?.director ? window.cc : (window.cocos?.director ? window.cocos : null);
-  const scene = cc?.director?.getScene?.();
-  if (!scene) return { ok: false, error: "No active scene", properties: [] };
-
-  function findNodeByUuid(root, id) {
-    if (!root) return null;
-    if (root.uuid === id) return root;
-    for (const child of root.children || []) {
-      const found = findNodeByUuid(child, id);
-      if (found) return found;
-    }
-    return null;
-  }
-
-  function asVec3(value, fallback) {
-    const base = fallback || { x: 0, y: 0, z: 0 };
-    if (!value || typeof value !== "object") return { ...base };
-    return {
-      x: Number.isFinite(Number(value.x)) ? Number(value.x) : base.x,
-      y: Number.isFinite(Number(value.y)) ? Number(value.y) : base.y,
-      z: Number.isFinite(Number(value.z)) ? Number(value.z) : base.z,
-    };
-  }
-
-  const resolved =
-    findNodeByUuid(scene, String(targetUuid || "").trim()) ||
-    (window.$n && window.$n.uuid === targetUuid ? window.$n : null);
-  if (!resolved) return { ok: false, error: "Node not found", properties: [] };
-
-  const properties = [];
-  try {
-    properties.push({ key: "name", rawKey: "name", type: "string", fields: null, value: String(resolved.name ?? "") });
-  } catch {}
-  try {
-    const isScene =
-      (cc?.Scene && resolved instanceof cc.Scene) ||
-      resolved === scene ||
-      resolved.isScene === true;
-    if (!isScene) {
-      const active =
-        typeof resolved._active === "boolean" ? resolved._active : resolved.active !== false;
-      properties.push({ key: "active", rawKey: "active", type: "boolean", fields: null, value: !!active });
-    }
-  } catch {}
-  try {
-    let pos = resolved._position;
-    if (!pos || typeof pos !== "object") {
-      if (typeof resolved.getPosition === "function") {
-        const out = { x: 0, y: 0, z: 0 };
-        pos = resolved.getPosition(out) || out;
-      }
-    }
-    if (!pos || typeof pos !== "object") {
-      const pub = resolved.position;
-      pos = pub && typeof pub === "object" ? pub : { x: resolved.x ?? 0, y: resolved.y ?? 0, z: resolved.z ?? 0 };
-    }
-    properties.push({ key: "position", rawKey: "position", type: "vec3", fields: ["x", "y", "z"], value: asVec3(pos) });
-  } catch {
-    properties.push({ key: "position", rawKey: "position", type: "vec3", fields: ["x", "y", "z"], value: { x: 0, y: 0, z: 0 } });
+  if (!bridge || typeof bridge.getNodeProperties !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page", properties: [] };
   }
   try {
-    let scale = resolved._scale;
-    if (!scale || typeof scale !== "object") {
-      const pub = resolved.scale;
-      if (pub && typeof pub === "object") scale = pub;
-    }
-    if (!scale || typeof scale !== "object") {
-      if (typeof resolved.getScale === "function") {
-        const out = { x: 1, y: 1, z: 1 };
-        const ret = resolved.getScale(out);
-        if (ret && typeof ret === "object") scale = ret;
-      }
-    }
-    properties.push({
-      key: "scale",
-      rawKey: "scale",
-      type: "vec3",
-      fields: ["x", "y", "z"],
-      value: asVec3(scale, { x: 1, y: 1, z: 1 }),
-    });
-  } catch {
-    properties.push({ key: "scale", rawKey: "scale", type: "vec3", fields: ["x", "y", "z"], value: { x: 1, y: 1, z: 1 } });
+    return bridge.getNodeProperties(${JSON.stringify(uuid)});
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err), properties: [] };
   }
-  try {
-    // Prefer _eulerAngles — public rotationX/Y warn on CC2.1+.
-    const euler =
-      (resolved._eulerAngles && typeof resolved._eulerAngles === "object" && resolved._eulerAngles) ||
-      (resolved.eulerAngles && typeof resolved.eulerAngles === "object" && resolved.eulerAngles) ||
-      null;
-    if (euler) {
-      properties.push({
-        key: "eulerAngles",
-        rawKey: "eulerAngles",
-        type: "vec3",
-        fields: ["x", "y", "z"],
-        value: asVec3(euler),
-      });
-    }
-  } catch {}
-  try {
-    const angle =
-      (resolved._eulerAngles && typeof resolved._eulerAngles.z === "number"
-        ? resolved._eulerAngles.z
-        : null) ??
-      (typeof resolved.angle === "number" ? resolved.angle : null);
-    if (typeof angle === "number") {
-      properties.push({ key: "angle", rawKey: "angle", type: "number", fields: null, value: angle });
-    }
-  } catch {}
-  try {
-    if (typeof resolved.layer === "number") {
-      properties.push({ key: "layer", rawKey: "layer", type: "number", fields: null, value: resolved.layer });
-    }
-  } catch {}
-
-  return { ok: true, properties };
 })()`;
 
 const EVAL_SET_NODE_PROP = (uuid, key, value) => `(() => {
-  const targetUuid = ${JSON.stringify(uuid)};
-  const propKey = ${JSON.stringify(key)};
-  const nextValue = ${JSON.stringify(value)};
   const bridge = window.__cocosHierarchyBridge__;
-  if (bridge && typeof bridge.setNodeProperty === "function") {
-    try {
-      return bridge.setNodeProperty(targetUuid, propKey, nextValue);
-    } catch (err) {
-      return { ok: false, error: err?.message || String(err) };
-    }
+  if (!bridge || typeof bridge.setNodeProperty !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page" };
   }
-
-  const cc = window.cc?.director ? window.cc : (window.cocos?.director ? window.cocos : null);
-  const scene = cc?.director?.getScene?.();
-  function findNodeByUuid(root, id) {
-    if (!root) return null;
-    if (root.uuid === id) return root;
-    for (const child of root.children || []) {
-      const found = findNodeByUuid(child, id);
-      if (found) return found;
-    }
-    return null;
-  }
-  const node =
-    (scene && findNodeByUuid(scene, String(targetUuid || "").trim())) ||
-    (window.$n && window.$n.uuid === targetUuid ? window.$n : null);
-  if (!node) return { ok: false, error: "Node not found" };
-
   try {
-    if (propKey === "name") {
-      node.name = String(nextValue ?? "");
-      return { ok: true, key: propKey, type: "string", value: node.name };
-    }
-    if (propKey === "active") {
-      const isScene =
-        (cc?.Scene && node instanceof cc.Scene) ||
-        node === scene ||
-        node.isScene === true;
-      if (isScene) return { ok: false, error: "Scene active cannot be changed" };
-      const next = nextValue === true || nextValue === "true" || nextValue === 1 || nextValue === "1";
-      node.active = next;
-      const active = typeof node._active === "boolean" ? node._active : !!node.active;
-      return { ok: true, key: propKey, type: "boolean", value: !!active };
-    }
-    if (propKey === "layer" || propKey === "angle") {
-      const n = Number(nextValue);
-      if (!Number.isFinite(n)) return { ok: false, error: "Invalid number" };
-      node[propKey] = n;
-      return { ok: true, key: propKey, type: "number", value: node[propKey] };
-    }
-    if (propKey === "position" || propKey === "scale" || propKey === "eulerAngles") {
-      const x = Number(nextValue?.x) || 0;
-      const y = Number(nextValue?.y) || 0;
-      const z = Number(nextValue?.z) || 0;
-      if (propKey === "position") {
-        if (typeof node.setPosition === "function") node.setPosition(x, y, z);
-        else if (node.position) { node.position.x = x; node.position.y = y; node.position.z = z; }
-        else { node.x = x; node.y = y; node.z = z; }
-      } else if (propKey === "scale") {
-        if (typeof node.setScale === "function") node.setScale(x, y, z);
-        else if (node.scale) { node.scale.x = x; node.scale.y = y; node.scale.z = z; }
-      } else if (propKey === "eulerAngles") {
-        if (typeof node.setRotationFromEuler === "function") node.setRotationFromEuler(x, y, z);
-        else if (node.eulerAngles && typeof node.eulerAngles === "object") {
-          node.eulerAngles.x = x; node.eulerAngles.y = y; node.eulerAngles.z = z;
-        } else if (node._eulerAngles && typeof node._eulerAngles === "object") {
-          node._eulerAngles.x = x; node._eulerAngles.y = y; node._eulerAngles.z = z;
-          if (typeof node._fromEuler === "function") node._fromEuler();
-        } else {
-          node.angle = z;
-        }
-      }
-      return { ok: true, key: propKey, type: "vec3", fields: ["x", "y", "z"], value: { x, y, z } };
-    }
+    return bridge.setNodeProperty(
+      ${JSON.stringify(uuid)},
+      ${JSON.stringify(key)},
+      ${JSON.stringify(value)}
+    );
   } catch (err) {
     return { ok: false, error: err?.message || String(err) };
   }
-  return { ok: false, error: "Unsupported node property: " + propKey };
 })()`;
 
 const EVAL_FIND_REFS = (uuid) => `(() => {
-  const targetUuid = ${JSON.stringify(uuid)};
-  const cc = window.cc?.director ? window.cc : (window.cocos?.director ? window.cocos : null);
-  const scene = cc?.director?.getScene?.();
-  if (!scene) return { ok: false, error: "No active scene" };
-
-  function getNodePath(node) {
-    const parts = [];
-    let curr = node;
-    while (curr) {
-      parts.push(curr.name || "(unnamed)");
-      curr = curr.parent || null;
-    }
-    return parts.reverse().join("/");
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.findNodeReferences !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page" };
   }
-
-  function findNodeByUuid(root, id) {
-    if (!root) return null;
-    if (root.uuid === id) return root;
-    const children = root.children || [];
-    for (const child of children) {
-      const found = findNodeByUuid(child, id);
-      if (found) return found;
-    }
-    return null;
-  }
-
-  function isSkippedRefKey(key, depth) {
-    if (!key || key.startsWith("__")) return true;
-    if (
-      key === "constructor" || key === "prototype" ||
-      key === "_id" || key === "_objFlags" || key === "_name" || key === "_enabled" ||
-      key === "_parent" || key === "_children" || key === "_components" ||
-      key === "_scene" || key === "_eventProcessor" ||       key === "_persistNode" ||
-      key === "pos" || key === "rot" || key === "scale" ||
-      key === "rotation" || key === "rotationX" || key === "rotationY" ||
-      key === "_rotationX" || key === "_rotationY"
-    ) return true;
-    if (depth === 0 && (key === "node" || key === "_node")) return true;
-    return false;
-  }
-
-  function collectOwnKeys(value) {
-    const keys = new Set();
-    try { Object.keys(value).forEach((k) => keys.add(k)); } catch {}
-    try { Object.getOwnPropertyNames(value).forEach((k) => keys.add(k)); } catch {}
-    try {
-      const declared = value.constructor?.__values__ || value.constructor?.__props__;
-      if (Array.isArray(declared)) declared.forEach((k) => keys.add(k));
-    } catch {}
-    return keys;
-  }
-
-  function safeReadOwn(value, key) {
-    try {
-      if (Object.prototype.hasOwnProperty.call(value, key)) {
-        const desc = Object.getOwnPropertyDescriptor(value, key);
-        if (desc && "value" in desc) return desc.value;
-        return value[key];
-      }
-      const privateKey = key[0] === "_" ? null : ("_" + key);
-      if (privateKey && Object.prototype.hasOwnProperty.call(value, privateKey)) {
-        return value[privateKey];
-      }
-      // Never read prototype getters — they trigger Cocos deprecation errors.
-      return undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  function isNodeLike(value, target) {
-    if (!value || typeof value !== "object") return false;
-    if (value === target) return true;
-    try {
-      return !!(value.uuid && target.uuid && value.uuid === target.uuid && value._components);
-    } catch {
-      return false;
-    }
-  }
-
-  function shouldNotDescend(value) {
-    if (!value || typeof value !== "object") return true;
-    if (Array.isArray(value)) return false;
-    if (ArrayBuffer.isView(value)) return true;
-    const name = value.constructor?.name || "";
-    if (/^(Vec2|Vec3|Vec4|Color|Quat|Mat3|Mat4|Size|Rect|Node|Scene|Component|Asset|Texture2D|TextureBase|TextureCube|Material|Mesh|MeshBuffer|Pass|Device|Camera|RenderTexture|SpriteFrame|BitmapFont|Font|EffectAsset|Graphics|UITransform|UIOpacity|Widget|Label|Sprite|RichText|Layout|Mask|Canvas|Model|SubModel|Renderer|Renderable2D|Batcher2D|NodeEventProcessor|SystemEvent)$/.test(name)) {
-      return true;
-    }
-    try {
-      if (value.uuid && value._components) return true;
-      if (value.node && value.uuid === undefined && value._id !== undefined) return true;
-    } catch {}
-    return false;
-  }
-
-  function scanObjectForNodeRef(value, target, visited, depth, path) {
-    if (!value || depth > 3) return [];
-    if (typeof value !== "object") return [];
-    if (visited.has(value)) return [];
-    visited.add(value);
-    const hits = [];
-    for (const key of collectOwnKeys(value)) {
-      if (isSkippedRefKey(key, depth)) continue;
-      const child = safeReadOwn(value, key);
-      if (child == null || typeof child === "function") continue;
-      const isIndex = Array.isArray(value) && /^\\d+$/.test(key);
-      const fieldPath = path
-        ? (isIndex ? path + "[" + key + "]" : path + "." + key)
-        : String(key).replace(/^_/, "");
-      if (isNodeLike(child, target)) {
-        hits.push(fieldPath);
-        continue;
-      }
-      if (shouldNotDescend(child)) continue;
-      hits.push(...scanObjectForNodeRef(child, target, visited, depth + 1, fieldPath));
-    }
-    return hits;
-  }
-
-  const target = findNodeByUuid(scene, String(targetUuid || "").trim());
-  if (!target) return { ok: false, error: "Node not found for UUID: " + targetUuid };
-
-  const hits = [];
-  const stack = [scene];
-  while (stack.length) {
-    const node = stack.pop();
-    const comps = node?._components || [];
-    for (const comp of comps) {
-      if (!comp) continue;
-      const fieldNames = scanObjectForNodeRef(comp, target, new WeakSet(), 0, "");
-      if (!fieldNames.length) continue;
-      let compName = comp.constructor?.name || "Component";
-      try {
-        if (cc?.js?.getClassName) compName = cc.js.getClassName(comp) || compName;
-      } catch {}
-      for (const fieldName of fieldNames) {
-        hits.push({
-          nodeUuid: node.uuid,
-          nodeName: node.name || "(unnamed)",
-          hierarchyPath: getNodePath(node),
-          componentName: compName || "Component",
-          fieldName: fieldName || "(unknown field)",
-        });
-      }
-    }
-    const children = node?.children || [];
-    for (const child of children) stack.push(child);
-  }
-
-  return {
-    ok: true,
-    target: { uuid: target.uuid, name: target.name, path: getNodePath(target) },
-    count: hits.length,
-    hits,
-  };
+  return bridge.findNodeReferences(${JSON.stringify(uuid)});
 })()`;
 
 const EVAL_TRACE_SPINE = (uuid, animationName) => `(() => {
@@ -654,8 +340,62 @@ const EVAL_CLEAR_HIGHLIGHT = `(() => {
   return bridge.clearNodeHighlight();
 })()`;
 
-function evalInPage(expression, callback) {
-  chrome.devtools.inspectedWindow.eval(expression, (result, exceptionInfo) => {
+const EVAL_GET_SKELETON_BONES = (uuid, componentIndex) => `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.getSkeletonBoneTree !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page", bones: [] };
+  }
+  return bridge.getSkeletonBoneTree(${JSON.stringify(uuid)}, ${JSON.stringify(componentIndex)});
+})()`;
+
+const EVAL_HIGHLIGHT_BONE = (uuid, boneName, componentIndex) => `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.highlightSkeletonBone !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page" };
+  }
+  return bridge.highlightSkeletonBone(
+    ${JSON.stringify(uuid)},
+    ${JSON.stringify(boneName)},
+    ${JSON.stringify(componentIndex)}
+  );
+})()`;
+
+const EVAL_CLEAR_BONE_HIGHLIGHT = `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.clearSkeletonBoneHighlight !== "function") {
+    return { ok: false };
+  }
+  return bridge.clearSkeletonBoneHighlight();
+})()`;
+
+function wrapEvalExpression(expression) {
+  // Return JSON strings instead of object graphs. Chrome's inspector protocol
+  // is extremely slow when Runtime.evaluate returns a large object (it walks
+  // every property for the frontend preview).
+  return `(() => {
+    try {
+      const __r = (${expression});
+      if (__r !== null && typeof __r === "object") return JSON.stringify(__r);
+      return __r;
+    } catch (e) {
+      return JSON.stringify({ ok: false, error: e && e.message ? e.message : String(e) });
+    }
+  })()`;
+}
+
+function parseEvalResult(result) {
+  if (typeof result !== "string") return result;
+  const first = result.charAt(0);
+  if (first !== "{" && first !== "[") return result;
+  try {
+    return JSON.parse(result);
+  } catch {
+    return result;
+  }
+}
+
+function evalInPage(expression, callback, options = {}) {
+  chrome.devtools.inspectedWindow.eval(wrapEvalExpression(expression), (result, exceptionInfo) => {
     if (exceptionInfo?.isException) {
       const value = exceptionInfo.value;
       const message =
@@ -666,7 +406,11 @@ function evalInPage(expression, callback) {
       callback(null, message);
       return;
     }
-    callback(result, null);
+    if (typeof options.unchangedRaw === "string" && options.unchangedRaw.length > 0 && result === options.unchangedRaw) {
+      callback(null, null, result, true);
+      return;
+    }
+    callback(parseEvalResult(result), null, result, false);
   });
 }
 
@@ -987,11 +731,91 @@ function scheduleNodeHighlight(uuid) {
     clearTimeout(clearHighlightTimer);
     clearHighlightTimer = null;
   }
+  if (hoverBoneTimer) {
+    clearTimeout(hoverBoneTimer);
+    hoverBoneTimer = null;
+  }
+  if (hoverBoneName) {
+    hoverBoneName = null;
+    evalInPage(EVAL_CLEAR_BONE_HIGHLIGHT, () => {});
+  }
   if (hoverHighlightTimer) clearTimeout(hoverHighlightTimer);
   hoverHighlightTimer = setTimeout(() => {
     hoverHighlightTimer = null;
     highlightNodeInGame(uuid);
-  }, 20);
+  }, 50);
+}
+
+function highlightBoneInGame(uuid, boneName, componentIndex) {
+  const id = String(uuid || "").trim();
+  const name = String(boneName || "").trim();
+  if (!id || !name) return;
+  if (clearBoneTimer) {
+    clearTimeout(clearBoneTimer);
+    clearBoneTimer = null;
+  }
+  if (hoverHighlightTimer) {
+    clearTimeout(hoverHighlightTimer);
+    hoverHighlightTimer = null;
+  }
+  if (clearHighlightTimer) {
+    clearTimeout(clearHighlightTimer);
+    clearHighlightTimer = null;
+  }
+  hoverHighlightUuid = null;
+  if (hoverBoneName === name) return;
+  hoverBoneName = name;
+  evalInPage(EVAL_HIGHLIGHT_BONE(id, name, componentIndex), () => {});
+}
+
+function clearBoneHighlightInGame() {
+  if (hoverBoneTimer) {
+    clearTimeout(hoverBoneTimer);
+    hoverBoneTimer = null;
+  }
+  if (clearBoneTimer) clearTimeout(clearBoneTimer);
+  clearBoneTimer = setTimeout(() => {
+    clearBoneTimer = null;
+    hoverBoneName = null;
+    evalInPage(EVAL_CLEAR_BONE_HIGHLIGHT, () => {});
+  }, 40);
+}
+
+function scheduleBoneHighlight(uuid, boneName, componentIndex) {
+  if (clearBoneTimer) {
+    clearTimeout(clearBoneTimer);
+    clearBoneTimer = null;
+  }
+  if (hoverBoneTimer) clearTimeout(hoverBoneTimer);
+  hoverBoneTimer = setTimeout(() => {
+    hoverBoneTimer = null;
+    highlightBoneInGame(uuid, boneName, componentIndex);
+  }, 50);
+}
+
+function isSkeletonComponentName(name) {
+  return /spine|skeleton/i.test(String(name || ""));
+}
+
+function resetBoneTreeState() {
+  boneTreeOpen = false;
+  boneTreeUuid = null;
+  boneTreeComponentIndex = null;
+  boneTree = [];
+  boneTreeCount = 0;
+  boneTreeStatus = "idle";
+  boneTreeError = "";
+  boneTreeCollapsed = new Set();
+  hoverBoneName = null;
+  if (hoverBoneTimer) {
+    clearTimeout(hoverBoneTimer);
+    hoverBoneTimer = null;
+  }
+  if (clearBoneTimer) {
+    clearTimeout(clearBoneTimer);
+    clearBoneTimer = null;
+  }
+  evalInPage(EVAL_CLEAR_BONE_HIGHLIGHT, () => {});
 }
 
 function setReferenceResults(items) {
@@ -1596,6 +1420,7 @@ function selectNode(node) {
     nodeProperties = [];
     nodePropertiesStatus = "idle";
     nodePropertiesError = "";
+    resetBoneTreeState();
   }
   updateSpineTraceToolVisibility(node);
   updateBreakNodeTargetLabel(node);
@@ -1612,7 +1437,7 @@ function isEditingComponentProperty() {
 }
 
 function isDetailInteractionLocked() {
-  return isEditingComponentProperty() || detailPointerActive || componentPropListResizing;
+  return isEditingComponentProperty() || detailPointerActive || componentPropListResizing || !!hoverBoneName;
 }
 
 function releaseDetailPointerLock() {
@@ -1836,6 +1661,148 @@ function renderNodePropertiesHtml() {
   `;
 }
 
+function renderBoneNode(bone, depth, container) {
+  if (!bone) return;
+  const children = Array.isArray(bone.children) ? bone.children : [];
+  const hasChildren = children.length > 0;
+  const collapsed = boneTreeCollapsed.has(bone.name);
+  const isExpanded = hasChildren && !collapsed;
+
+  const nodeEl = document.createElement("div");
+  nodeEl.className = "tree-node";
+
+  const row = document.createElement("div");
+  row.className = "tree-row bone-row";
+  row.dataset.boneName = bone.name;
+  row.style.paddingLeft = `${depth * 12 + 4}px`;
+
+  const toggle = document.createElement("span");
+  toggle.className = `toggle ${hasChildren ? "clickable" : "empty"}`;
+  toggle.textContent = hasChildren ? (isExpanded ? "▼" : "▶") : "";
+  toggle.title = hasChildren ? "Expand/collapse" : "";
+  toggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (!hasChildren) return;
+    if (collapsed) boneTreeCollapsed.delete(bone.name);
+    else boneTreeCollapsed.add(bone.name);
+    const node = hierarchy?.tree && selectedUuid ? findNode(hierarchy.tree, selectedUuid) : null;
+    if (node) scheduleRenderDetail(node, { immediate: true });
+  });
+
+  const icon = document.createElement("span");
+  icon.className = "node-icon";
+  icon.textContent = hasChildren ? "🦴" : "•";
+
+  const name = document.createElement("span");
+  name.className = "node-name";
+  name.textContent = bone.name || "(unnamed)";
+
+  row.appendChild(toggle);
+  row.appendChild(icon);
+  row.appendChild(name);
+  row.addEventListener("mouseenter", () => {
+    scheduleBoneHighlight(boneTreeUuid, bone.name, boneTreeComponentIndex);
+  });
+  row.addEventListener("mouseleave", () => clearBoneHighlightInGame());
+
+  nodeEl.appendChild(row);
+  if (hasChildren && isExpanded) {
+    const childrenEl = document.createElement("div");
+    childrenEl.className = "tree-children";
+    for (const child of children) renderBoneNode(child, depth + 1, childrenEl);
+    nodeEl.appendChild(childrenEl);
+  }
+  container.appendChild(nodeEl);
+}
+
+function renderBoneTreeHtml() {
+  if (!boneTreeOpen || boneTreeUuid !== selectedUuid) return "";
+  if (boneTreeStatus === "loading" || boneTreeStatus === "idle") {
+    return `
+      <div class="bone-tree-panel" id="bone-tree-panel">
+        <div class="bone-tree-header">
+          <h2>Skeleton bones</h2>
+          <button type="button" id="btn-close-bone-tree" title="Close bone tree">✕</button>
+        </div>
+        <div class="bone-tree empty">Loading bones…</div>
+      </div>
+    `;
+  }
+  if (boneTreeStatus === "error") {
+    return `
+      <div class="bone-tree-panel" id="bone-tree-panel">
+        <div class="bone-tree-header">
+          <h2>Skeleton bones</h2>
+          <button type="button" id="btn-close-bone-tree" title="Close bone tree">✕</button>
+        </div>
+        <div class="bone-tree empty">${escapeHtml(boneTreeError || "Failed to load bones.")}</div>
+      </div>
+    `;
+  }
+  return `
+    <div class="bone-tree-panel" id="bone-tree-panel">
+      <div class="bone-tree-header">
+        <h2>Skeleton bones${boneTreeCount ? ` (${boneTreeCount})` : ""}</h2>
+        <button type="button" id="btn-close-bone-tree" title="Close bone tree">✕</button>
+      </div>
+      <div class="bone-tree" id="bone-tree"></div>
+    </div>
+  `;
+}
+
+function bindBoneTree() {
+  const closeBtn = document.getElementById("btn-close-bone-tree");
+  if (closeBtn) {
+    closeBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      resetBoneTreeState();
+      const node = hierarchy?.tree && selectedUuid ? findNode(hierarchy.tree, selectedUuid) : null;
+      if (node) scheduleRenderDetail(node, { immediate: true });
+    });
+  }
+  const tree = document.getElementById("bone-tree");
+  if (!tree || !Array.isArray(boneTree) || !boneTree.length) return;
+  tree.innerHTML = "";
+  for (const bone of boneTree) renderBoneNode(bone, 0, tree);
+}
+
+function openBoneTree(node, componentIndex) {
+  if (!node) return;
+  if (boneTreeOpen && boneTreeUuid === node.uuid && boneTreeComponentIndex === componentIndex) {
+    resetBoneTreeState();
+    scheduleRenderDetail(node, { immediate: true });
+    return;
+  }
+  boneTreeOpen = true;
+  boneTreeUuid = node.uuid;
+  boneTreeComponentIndex = componentIndex;
+  boneTree = [];
+  boneTreeCount = 0;
+  boneTreeStatus = "loading";
+  boneTreeError = "";
+  boneTreeCollapsed = new Set();
+  scheduleRenderDetail(node, { immediate: true });
+  evalInPage(EVAL_GET_SKELETON_BONES(node.uuid, componentIndex), (result, err) => {
+    if (!boneTreeOpen || boneTreeUuid !== node.uuid || selectedUuid !== node.uuid) return;
+    if (err || !result?.ok) {
+      boneTree = [];
+      boneTreeCount = 0;
+      boneTreeStatus = "error";
+      boneTreeError = result?.error || err || "Failed to load skeleton bones.";
+      setToolStatus(boneTreeError, "error");
+      scheduleRenderDetail(node, { immediate: true });
+      return;
+    }
+    boneTree = result.bones || [];
+    boneTreeCount = Number(result.boneCount) || boneTree.length;
+    boneTreeStatus = "ready";
+    boneTreeError = "";
+    setToolStatus(`Opened bone tree (${boneTreeCount} bones). Hover a bone to preview it in-game.`, "ok");
+    scheduleRenderDetail(node, { immediate: true });
+  });
+}
+
 function renderComponentPropertiesHtml() {
   if (selectedComponentIndex == null) {
     return `<div class="component-props empty">Click a component to inspect editable properties.</div>`;
@@ -1986,44 +1953,59 @@ function loadNodeProperties(uuid, options = {}) {
     nodePropertiesStatus = "loading";
     nodePropertiesError = "";
   }
-  evalInPage(EVAL_GET_NODE_PROPS(uuid), (result, err) => {
-    if (selectedUuid !== uuid) return;
-    if (err || !result?.ok) {
-      if (!silent || nodePropertiesStatus !== "ready") {
-        nodeProperties = [];
-        nodePropertiesStatus = "error";
-        nodePropertiesError = result?.error || err || "Failed to load node properties.";
+  evalInPage(
+    EVAL_GET_NODE_PROPS(uuid),
+    (result, err, raw, unchanged) => {
+      if (selectedUuid !== uuid) return;
+      if (unchanged) return;
+      lastNodePropsRaw = typeof raw === "string" ? raw : "";
+      lastNodePropsUuid = uuid;
+      if (err || !result?.ok) {
+        if (!silent || nodePropertiesStatus !== "ready") {
+          nodeProperties = [];
+          nodePropertiesStatus = "error";
+          nodePropertiesError = result?.error || err || "Failed to load node properties.";
+        }
+        if (!silent) setToolStatus(result?.error || err || "Failed to load node properties.", "error");
+        const node = hierarchy?.tree ? findNode(hierarchy.tree, uuid) : null;
+        if (node) requestDetailRender(node, { immediate: !silent, silent });
+        return;
       }
-      if (!silent) setToolStatus(result?.error || err || "Failed to load node properties.", "error");
+      nodeProperties = result.properties || [];
+      nodePropertiesStatus = "ready";
+      nodePropertiesError = "";
       const node = hierarchy?.tree ? findNode(hierarchy.tree, uuid) : null;
       if (node) requestDetailRender(node, { immediate: !silent, silent });
-      return;
-    }
-    nodeProperties = result.properties || [];
-    nodePropertiesStatus = "ready";
-    nodePropertiesError = "";
-    const node = hierarchy?.tree ? findNode(hierarchy.tree, uuid) : null;
-    if (node) requestDetailRender(node, { immediate: !silent, silent });
-  });
+    },
+    { unchangedRaw: lastNodePropsUuid === uuid ? lastNodePropsRaw : "" }
+  );
 }
 
 function loadComponentProperties(uuid, componentIndex, options = {}) {
   const { silent = false } = options;
-  evalInPage(EVAL_GET_COMPONENT_PROPS(uuid, componentIndex), (result, err) => {
-    if (selectedUuid !== uuid || selectedComponentIndex !== componentIndex) return;
-    if (err || !result?.ok) {
-      componentProperties = [];
-      componentPropertiesName = "";
-      if (!silent) setToolStatus(result?.error || err || "Failed to load properties.", "error");
+  const propsKey = `${uuid}:${componentIndex}`;
+  evalInPage(
+    EVAL_GET_COMPONENT_PROPS(uuid, componentIndex),
+    (result, err, raw, unchanged) => {
+      if (selectedUuid !== uuid || selectedComponentIndex !== componentIndex) return;
+      if (unchanged) return;
+      lastComponentPropsRaw = typeof raw === "string" ? raw : "";
+      lastComponentPropsKey = propsKey;
+      if (err || !result?.ok) {
+        componentProperties = [];
+        componentPropertiesName = "";
+        if (!silent) setToolStatus(result?.error || err || "Failed to load properties.", "error");
+        const node = hierarchy?.tree ? findNode(hierarchy.tree, uuid) : null;
+        if (node) requestDetailRender(node, { immediate: !silent, silent });
+        return;
+      }
+      componentProperties = result.properties || [];
+      componentPropertiesName = result.componentName || "Component";
       const node = hierarchy?.tree ? findNode(hierarchy.tree, uuid) : null;
       if (node) requestDetailRender(node, { immediate: !silent, silent });
-      return;
-    }
-    componentProperties = result.properties || [];
-    componentPropertiesName = result.componentName || "Component";
-    const node = hierarchy?.tree ? findNode(hierarchy.tree, uuid) : null;
-    if (node) requestDetailRender(node, { immediate: !silent, silent });
-  });
+    },
+    { unchangedRaw: lastComponentPropsKey === propsKey ? lastComponentPropsRaw : "" }
+  );
 }
 
 function renderDetail(node) {
@@ -2036,6 +2018,7 @@ function renderDetail(node) {
     nodeProperties = [];
     nodePropertiesStatus = "idle";
     nodePropertiesError = "";
+    resetBoneTreeState();
     return;
   }
 
@@ -2044,9 +2027,13 @@ function renderDetail(node) {
   detailEl.className = "detail";
   const comps = node.components
     .map((c, i) => {
-      const isSpine = /spine|skeleton/i.test(c);
+      const isSpine = isSkeletonComponentName(c);
       const selected = selectedComponentIndex === i ? " selected" : "";
-      return `<button class="component${isSpine ? " spine" : ""}${selected}" data-component-index="${i}" type="button" title="Inspect properties and set as $c">${escapeHtml(c)}</button>`;
+      const bonesOpen = boneTreeOpen && boneTreeUuid === node.uuid && boneTreeComponentIndex === i;
+      const bonesBtn = isSpine
+        ? `<button class="component-bones-btn${bonesOpen ? " active" : ""}" data-bones-index="${i}" type="button" title="Open skeleton bones tree">Bones</button>`
+        : "";
+      return `<span class="component-wrap"><button class="component${isSpine ? " spine" : ""}${selected}" data-component-index="${i}" type="button" title="Inspect properties and set as $c">${escapeHtml(c)}</button>${bonesBtn}</span>`;
     })
     .join("");
 
@@ -2061,6 +2048,7 @@ function renderDetail(node) {
       <h2>Components</h2>
       ${comps || '<span style="color:var(--text-dim)">None</span>'}
     </div>
+    ${renderBoneTreeHtml()}
     ${renderComponentPropertiesHtml()}
   `;
 
@@ -2085,6 +2073,16 @@ function renderDetail(node) {
     });
   });
 
+  detailEl.querySelectorAll("[data-bones-index]").forEach((el) => {
+    el.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const index = Number(el.getAttribute("data-bones-index"));
+      openBoneTree(node, index);
+    });
+  });
+
+  bindBoneTree();
   bindPropertyEditors(node);
   bindComponentPropListResize();
   bindNodePropListScroll();
@@ -2142,61 +2140,95 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
+function refreshSelectedNodeInspector(treeChanged) {
+  if (!selectedUuid || !hierarchy?.tree) {
+    updateSpineTraceToolVisibility(null);
+    updateBreakNodeTargetLabel(null);
+    return;
+  }
+  const node = findNode(hierarchy.tree, selectedUuid);
+  if (!node) {
+    selectedUuid = null;
+    selectedComponentIndex = null;
+    componentProperties = [];
+    componentPropertiesName = "";
+    nodeProperties = [];
+    nodePropertiesStatus = "idle";
+    nodePropertiesError = "";
+    lastNodePropsRaw = "";
+    lastNodePropsUuid = "";
+    lastComponentPropsRaw = "";
+    lastComponentPropsKey = "";
+    updateSpineTraceToolVisibility(null);
+    updateBreakNodeTargetLabel(null);
+    return;
+  }
+  if (treeChanged) {
+    updateSpineTraceToolVisibility(node);
+    updateBreakNodeTargetLabel(node);
+  }
+  if (isDetailInteractionLocked()) {
+    detailRefreshPending = true;
+    return;
+  }
+  loadNodeProperties(node.uuid, { silent: true });
+  if (selectedComponentIndex != null) {
+    loadComponentProperties(node.uuid, selectedComponentIndex, { silent: true });
+  } else if (treeChanged) {
+    requestDetailRender(node, { silent: true });
+  }
+}
+
+function finishRefresh() {
+  refreshInFlight = false;
+  if (refreshQueued) {
+    refreshQueued = false;
+    refresh();
+  }
+}
+
 function refresh() {
-  evalInPage(EVAL_GET_HIERARCHY, (result, err) => {
-    if (err) {
-      hierarchy = { ok: false, error: err };
-      setStatus(err, "error");
-      renderTree();
-      return;
-    }
-
-    hierarchy = result;
-    if (!result?.ok) {
-      setStatus(result?.error || "Cocos not ready", "error");
-      renderTree();
-      return;
-    }
-
-    setStatus(`${result.sceneName} · CC ${result.engineVersion}`, "ok");
-
-    updateComponentFilterOptions();
-    ensureExpandedForMarkedNode(hierarchy.tree);
-
-    if (selectedUuid && hierarchy.tree) {
-      const node = findNode(hierarchy.tree, selectedUuid);
-      if (node) {
-        updateSpineTraceToolVisibility(node);
-        updateBreakNodeTargetLabel(node);
-        if (isDetailInteractionLocked()) {
-          detailRefreshPending = true;
-        } else {
-          // Avoid wiping scroll / scrollbar drag with an immediate full rebuild.
-          loadNodeProperties(node.uuid, { silent: true });
-          if (selectedComponentIndex != null) {
-            loadComponentProperties(node.uuid, selectedComponentIndex, { silent: true });
-          } else {
-            requestDetailRender(node, { silent: true });
-          }
+  if (refreshInFlight) {
+    refreshQueued = true;
+    return;
+  }
+  refreshInFlight = true;
+  evalInPage(
+    EVAL_GET_HIERARCHY,
+    (result, err, raw, unchanged) => {
+      try {
+        if (unchanged && hierarchy?.ok) {
+          refreshSelectedNodeInspector(false);
+          return;
         }
-      } else {
-        selectedUuid = null;
-        selectedComponentIndex = null;
-        componentProperties = [];
-        componentPropertiesName = "";
-        nodeProperties = [];
-        nodePropertiesStatus = "idle";
-        nodePropertiesError = "";
-        updateSpineTraceToolVisibility(null);
-        updateBreakNodeTargetLabel(null);
-      }
-    } else {
-      updateSpineTraceToolVisibility(null);
-      updateBreakNodeTargetLabel(null);
-    }
 
-    renderTree();
-  });
+        if (err) {
+          lastHierarchyRaw = "";
+          hierarchy = { ok: false, error: err };
+          setStatus(err, "error");
+          renderTree();
+          return;
+        }
+
+        lastHierarchyRaw = typeof raw === "string" ? raw : "";
+        hierarchy = result;
+        if (!result?.ok) {
+          setStatus(result?.error || "Cocos not ready", "error");
+          renderTree();
+          return;
+        }
+
+        setStatus(`${result.sceneName} · CC ${result.engineVersion}`, "ok");
+        updateComponentFilterOptions();
+        ensureExpandedForMarkedNode(hierarchy.tree);
+        refreshSelectedNodeInspector(true);
+        renderTree();
+      } finally {
+        finishRefresh();
+      }
+    },
+    { unchangedRaw: lastHierarchyRaw }
+  );
 }
 
 function startAutoRefresh() {

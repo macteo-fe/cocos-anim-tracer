@@ -1,5 +1,5 @@
 (function () {
-  const BRIDGE_VERSION = 19;
+  const BRIDGE_VERSION = 23;
   // Always refresh bridge API so extension reloads apply even if an older
   // inject already set window.__cocosHierarchyBridge__.
 
@@ -156,8 +156,6 @@
       name: node.name || "(unnamed)",
       active: readNodeActive(node),
       activeInHierarchy: readNodeActiveInHierarchy(node),
-      position: getPosition(node),
-      layer: node.layer ?? 0,
       components,
       isSpine: isSpineNode(components),
       childCount: (node.children || []).length,
@@ -1113,25 +1111,30 @@
     };
   }
 
-  function findSpineComponent(node) {
-    const comps = node?._components || [];
+  function isSkeletonLikeComponent(comp) {
+    if (!comp) return false;
+    const ctorName = comp.constructor?.name || "";
+    let className = "";
+    try {
+      className = getCocos()?.js?.getClassName?.(comp) || "";
+    } catch {}
+    const name = `${ctorName} ${className}`.trim();
     return (
-      comps.find((comp) => {
-        const ctorName = comp?.constructor?.name || "";
-        let className = "";
-        try {
-          className = getCocos()?.js?.getClassName?.(comp) || "";
-        } catch {}
-        const name = `${ctorName} ${className}`.trim();
-        return (
-          /spine|skeleton/i.test(name) ||
-          ctorName === "sp.Skeleton" ||
-          ctorName === "Skeleton" ||
-          className === "sp.Skeleton" ||
-          className === "Skeleton"
-        );
-      }) || null
+      /spine|skeleton/i.test(name) ||
+      ctorName === "sp.Skeleton" ||
+      ctorName === "Skeleton" ||
+      className === "sp.Skeleton" ||
+      className === "Skeleton"
     );
+  }
+
+  function findSpineComponent(node, componentIndex = null) {
+    const comps = node?._components || [];
+    const index = Number(componentIndex);
+    if (Number.isFinite(index) && index >= 0 && isSkeletonLikeComponent(comps[index])) {
+      return comps[index];
+    }
+    return comps.find((comp) => isSkeletonLikeComponent(comp)) || null;
   }
 
   function traceSpineAnimation(nodeUuid, animationName) {
@@ -1277,6 +1280,255 @@
     if (spine.animation) names.add(String(spine.animation));
 
     return { ok: true, names: Array.from(names).filter(Boolean).sort() };
+  }
+
+  function getRuntimeSkeleton(spine) {
+    if (!spine) return null;
+    return (
+      spine._skeleton ||
+      spine._sgNode?._skeleton ||
+      spine._skeletonComp?._skeleton ||
+      spine.skeleton ||
+      spine._internalSkeleton ||
+      spine._armature ||
+      spine.armature ||
+      null
+    );
+  }
+
+  function getSkeletonBones(runtime) {
+    if (!runtime) return [];
+    if (Array.isArray(runtime.bones)) return runtime.bones;
+    try {
+      if (typeof runtime.getBones === "function") {
+        const bones = runtime.getBones();
+        if (Array.isArray(bones)) return bones;
+      }
+    } catch {}
+    if (Array.isArray(runtime._bones)) return runtime._bones;
+    return [];
+  }
+
+  function getBoneName(bone) {
+    if (!bone) return "";
+    return String(bone.data?.name || bone.name || "");
+  }
+
+  function getSkeletonComponent(node, componentIndex) {
+    return findSpineComponent(node, componentIndex);
+  }
+
+  function serializeBoneTree(bones) {
+    const items = [];
+    const byRef = new Map();
+    for (let i = 0; i < bones.length; i++) {
+      const bone = bones[i];
+      const name = getBoneName(bone) || `bone_${i}`;
+      const item = { name, index: i, children: [] };
+      items.push(item);
+      byRef.set(bone, item);
+    }
+    const roots = [];
+    for (let i = 0; i < bones.length; i++) {
+      const bone = bones[i];
+      const item = items[i];
+      const parent = bone?.parent || null;
+      if (parent && parent !== bone && byRef.has(parent)) {
+        byRef.get(parent).children.push(item);
+      } else {
+        roots.push(item);
+      }
+    }
+    return roots;
+  }
+
+  function getSkeletonBoneTree(nodeUuid, componentIndex = null) {
+    const uuid = String(nodeUuid || "").trim();
+    if (!uuid) return { ok: false, error: "Node UUID is required", bones: [] };
+
+    const node = getNodeByUuid(uuid);
+    if (!node) return { ok: false, error: `Node not found for UUID: ${uuid}`, bones: [] };
+
+    const spine = getSkeletonComponent(node, componentIndex);
+    if (!spine) {
+      return { ok: false, error: "Selected node has no Spine/Skeleton component", bones: [] };
+    }
+
+    const runtime = getRuntimeSkeleton(spine);
+    const bones = getSkeletonBones(runtime);
+    if (!bones.length) {
+      return { ok: false, error: "Skeleton has no bones (not initialized yet?)", bones: [] };
+    }
+
+    const tree = serializeBoneTree(bones);
+    return {
+      ok: true,
+      nodeUuid: uuid,
+      nodeName: node.name || "(unnamed)",
+      componentName: getComponentDisplayName(spine),
+      boneCount: bones.length,
+      bones: tree,
+    };
+  }
+
+  function findBoneByName(runtime, boneName) {
+    const name = String(boneName || "");
+    if (!runtime || !name) return null;
+    try {
+      if (typeof runtime.findBone === "function") {
+        const found = runtime.findBone(name);
+        if (found) return found;
+      }
+    } catch {}
+    const bones = getSkeletonBones(runtime);
+    return bones.find((bone) => getBoneName(bone) === name) || null;
+  }
+
+  function ensureRuntimeWorldUpToDate(spine, runtime) {
+    if (!runtime && !spine) return;
+    try {
+      if (spine && typeof spine._updateSkeleton === "function") {
+        spine._updateSkeleton();
+      }
+    } catch {}
+    try {
+      if (spine && typeof spine.updateWorldTransform === "function") {
+        spine.updateWorldTransform();
+      }
+    } catch {}
+    try {
+      if (runtime && typeof runtime.updateWorldTransform === "function") {
+        runtime.updateWorldTransform();
+      }
+    } catch {}
+  }
+
+  function spineDegToRad(deg) {
+    return (Number(deg) || 0) * (Math.PI / 180);
+  }
+
+  // Spine bone world position in skeleton space (not screen).
+  // Uses only fields present on spine-ts Bone: worldX/worldY, x/y, ax/ay, a/b/c/d.
+  function getBoneSkeletonPoint(bone, runtime) {
+    if (!bone) return { x: 0, y: 0 };
+    ensureRuntimeWorldUpToDate(null, runtime);
+
+    const wx = bone.worldX;
+    const wy = bone.worldY;
+    if (typeof wx === "number" && typeof wy === "number" && bone.appliedValid !== false) {
+      const lx = Number(bone.ax ?? bone.x ?? 0) || 0;
+      const ly = Number(bone.ay ?? bone.y ?? 0) || 0;
+      const hasLocalOffset = lx !== 0 || ly !== 0;
+      // Root at (0,0) is valid. For child bones with local offset, ignore stale worldX/worldY=0.
+      if (!bone.parent || !hasLocalOffset || wx !== 0 || wy !== 0) {
+        return { x: wx, y: wy };
+      }
+    }
+
+    // Manual world transform when runtime hasn't populated worldX/worldY yet.
+    const chain = [];
+    let curr = bone;
+    while (curr) {
+      chain.unshift(curr);
+      curr = curr.parent || null;
+    }
+
+    let pa = 1;
+    let pb = 0;
+    let pc = 0;
+    let pd = 1;
+    let worldX = 0;
+    let worldY = 0;
+
+    for (const item of chain) {
+      const lx = Number(item.ax ?? item.x ?? 0) || 0;
+      const ly = Number(item.ay ?? item.y ?? 0) || 0;
+      const rot = Number(item.arotation ?? item.rotation ?? 0) || 0;
+      const sx = Number(item.ascaleX ?? item.scaleX ?? 1) || 1;
+      const sy = Number(item.ascaleY ?? item.scaleY ?? 1) || 1;
+      const shearX = Number(item.ashearX ?? item.shearX ?? 0) || 0;
+      const shearY = Number(item.ashearY ?? item.shearY ?? 0) || 0;
+
+      const rad = spineDegToRad(rot + shearY);
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      const a = cos * sx;
+      const b = sin * sx;
+      const c = -sin * sy + cos * shearX * sy;
+      const d = cos * sy + sin * shearX * sy;
+
+      const na = pa * a + pb * c;
+      const nb = pa * b + pb * d;
+      const nc = pc * a + pd * c;
+      const nd = pc * b + pd * d;
+      worldX = pa * lx + pc * ly + worldX;
+      worldY = pb * lx + pd * ly + worldY;
+      pa = na;
+      pb = nb;
+      pc = nc;
+      pd = nd;
+    }
+
+    return { x: worldX, y: worldY };
+  }
+
+  function getBoneSkeletonTip(bone, runtime) {
+    const origin = getBoneSkeletonPoint(bone, runtime);
+    const length = Number(bone?.data?.length ?? 0) || 0;
+
+    if (length > 0 && typeof bone.a === "number" && typeof bone.c === "number") {
+      return {
+        x: origin.x + bone.a * length,
+        y: origin.y + bone.c * length,
+      };
+    }
+
+    if (length > 0) {
+      const rot = Number(bone.arotation ?? bone.rotation ?? 0) || 0;
+      const rad = spineDegToRad(rot);
+      return {
+        x: origin.x + Math.cos(rad) * length,
+        y: origin.y + Math.sin(rad) * length,
+      };
+    }
+
+    const firstChild = Array.isArray(bone?.children) ? bone.children[0] : null;
+    if (firstChild) {
+      return getBoneSkeletonPoint(firstChild, runtime);
+    }
+
+    return origin;
+  }
+
+  function skeletonPointToNodeWorld(spine, node, point) {
+    const x = Number(point?.x) || 0;
+    const y = Number(point?.y) || 0;
+
+    // CC2 sp.Skeleton often exposes node-space conversion helpers.
+    try {
+      if (typeof spine?.convertToWorldSpace === "function") {
+        const cc = getCocos();
+        const local = cc?.v2 ? cc.v2(x, y) : { x, y };
+        const ret = spine.convertToWorldSpace(local);
+        if (ret && Number.isFinite(ret.x) && Number.isFinite(ret.y)) {
+          return { x: ret.x, y: ret.y };
+        }
+      }
+    } catch {}
+
+    try {
+      if (typeof spine?.node?.convertToWorldSpaceAR === "function") {
+        const cc = getCocos();
+        const local = cc?.v2 ? cc.v2(x, y) : makeVec3(x, y, 0);
+        const ret = spine.node.convertToWorldSpaceAR(local);
+        if (ret && Number.isFinite(ret.x) && Number.isFinite(ret.y)) {
+          return { x: ret.x, y: ret.y };
+        }
+      }
+    } catch {}
+
+    const anchor = spine?.node || node;
+    return localToWorld(anchor, { x, y });
   }
 
   function applySpineTimeScale(cc, numericSpeed) {
@@ -1883,8 +2135,12 @@
 
   const HIGHLIGHT_STYLE_ID = "__animtracer-highlight-style__";
   const HIGHLIGHT_EL_ID = "__animtracer-node-highlight__";
+  const BONE_HIGHLIGHT_EL_ID = "__animtracer-bone-highlight__";
   let highlightRaf = 0;
   let highlightUuid = null;
+  let highlightKind = null;
+  let highlightBoneName = null;
+  let highlightComponentIndex = null;
 
   function getGameCanvas() {
     return (
@@ -1995,10 +2251,10 @@
         const name = comp?.constructor?.name || "";
         if (name === "Canvas" || name === "cc.Canvas") {
           const camComp = comp.cameraComponent || comp.camera;
-          return camComp?.camera || camComp || comp._camera || null;
+          return camComp?.camera || camComp || comp._camera || comp;
         }
         if (name === "Camera" || name === "cc.Camera") {
-          return comp.camera || comp;
+          return comp.camera || comp._camera || comp;
         }
       }
       curr = curr.parent;
@@ -2052,6 +2308,43 @@
     };
   }
 
+  function getWorldToScreenFn(camera) {
+    if (!camera) return null;
+    if (typeof camera.worldToScreen === "function") return camera.worldToScreen.bind(camera);
+    if (typeof camera.getWorldToScreenPoint === "function") return camera.getWorldToScreenPoint.bind(camera);
+    return null;
+  }
+
+  function callWorldToScreen(camera, x, y, order) {
+    const fn = getWorldToScreenFn(camera);
+    if (!fn) return null;
+    const world = makeVec3(x, y, 0);
+    const out = makeVec3(0, 0, 0);
+    try {
+      const ret = order === "worldFirst" ? fn(world, out) : fn(out, world);
+      const p = ret && typeof ret.x === "number" ? ret : out;
+      if (!Number.isFinite(Number(p.x)) || !Number.isFinite(Number(p.y))) return null;
+      return { x: Number(p.x), y: Number(p.y) };
+    } catch {
+      return null;
+    }
+  }
+
+  // Wrong worldToScreen arg order projects (0,0,0) → canvas bottom-left.
+  // Pick the order that actually separates two nearby world points.
+  function pickWorldToScreenOrder(camera, x, y) {
+    const probe = (order) => {
+      const a = callWorldToScreen(camera, x, y, order);
+      const b = callWorldToScreen(camera, x + 80, y + 50, order);
+      if (!a || !b) return -1;
+      return Math.abs(b.x - a.x) + Math.abs(b.y - a.y);
+    };
+    const worldFirst = probe("worldFirst");
+    const outFirst = probe("outFirst");
+    if (worldFirst < 0 && outFirst < 0) return null;
+    return worldFirst >= outFirst ? "worldFirst" : "outFirst";
+  }
+
   function projectWorldCorners(camera, rect) {
     const corners = [
       [rect.x, rect.y],
@@ -2063,26 +2356,13 @@
     const tryOrder = (order) => {
       const points = [];
       for (const [x, y] of corners) {
-        const world = makeVec3(x, y, 0);
-        const out = makeVec3(0, 0, 0);
-        try {
-          let ret;
-          if (order === "worldFirst") {
-            ret = camera.worldToScreen(world, out);
-          } else {
-            ret = camera.worldToScreen(out, world);
-          }
-          const p = ret && typeof ret.x === "number" ? ret : out;
-          if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return null;
-          points.push({ x: p.x, y: p.y });
-        } catch {
-          return null;
-        }
+        const p = callWorldToScreen(camera, x, y, order);
+        if (!p) return null;
+        points.push(p);
       }
       return points;
     };
 
-    // Cocos versions disagree on argument order; pick the projection with real size.
     const a = tryOrder("worldFirst");
     const b = tryOrder("outFirst");
     const aInfo = a ? screenSpread(a) : null;
@@ -2103,7 +2383,7 @@
     const scaleY = canvasRect.height / bufferH;
 
     const camera = findCameraForNode(node);
-    if (camera && typeof camera.worldToScreen === "function") {
+    if (camera && getWorldToScreenFn(camera)) {
       const points = projectWorldCorners(camera, rect);
       if (points) {
         const { minX, minY, maxX, maxY, spread } = screenSpread(points);
@@ -2163,6 +2443,46 @@
           white-space: nowrap;
           border-radius: 2px;
         }
+        #${BONE_HIGHLIGHT_EL_ID} {
+          position: fixed;
+          inset: 0;
+          pointer-events: none;
+          z-index: 2147483646;
+          display: none;
+        }
+        #${BONE_HIGHLIGHT_EL_ID} svg {
+          width: 100%;
+          height: 100%;
+          overflow: visible;
+        }
+        #${BONE_HIGHLIGHT_EL_ID} line {
+          stroke: #ff4d6d;
+          stroke-width: 3;
+          stroke-linecap: round;
+        }
+        #${BONE_HIGHLIGHT_EL_ID} circle.joint {
+          fill: #ff4d6d;
+          stroke: #fff;
+          stroke-width: 2;
+        }
+        #${BONE_HIGHLIGHT_EL_ID} circle.tip {
+          fill: #fff;
+          stroke: #ff4d6d;
+          stroke-width: 2;
+        }
+        #${BONE_HIGHLIGHT_EL_ID} .animtracer-bone-label {
+          position: absolute;
+          max-width: 240px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          font: 11px/16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+          color: #fff;
+          background: #ff4d6d;
+          padding: 0 5px;
+          white-space: nowrap;
+          border-radius: 2px;
+          transform: translate(-50%, calc(-100% - 8px));
+        }
       `;
       document.documentElement.appendChild(style);
     }
@@ -2179,10 +2499,162 @@
     return el;
   }
 
-  function updateHighlightFrame() {
-    if (!highlightUuid) return;
+  function hideNodeHighlightEl() {
+    const el = document.getElementById(HIGHLIGHT_EL_ID);
+    if (el) el.style.display = "none";
+  }
+
+  function hideBoneHighlightEl() {
+    const el = document.getElementById(BONE_HIGHLIGHT_EL_ID);
+    if (el) el.style.display = "none";
+  }
+
+  function stopHighlightLoop() {
+    if (highlightRaf) {
+      cancelAnimationFrame(highlightRaf);
+      highlightRaf = 0;
+    }
+  }
+
+  function startHighlightLoop() {
+    stopHighlightLoop();
+    highlightRaf = requestAnimationFrame(updateHighlightFrame);
+  }
+
+  function localToWorld(node, local) {
+    const x = Number(local?.x) || 0;
+    const y = Number(local?.y) || 0;
+    const ui = getUITransform(node);
+    if (ui?.convertToWorldSpaceAR) {
+      try {
+        const out = makeVec3(0, 0, 0);
+        const ret = ui.convertToWorldSpaceAR(makeVec3(x, y, 0), out) || out;
+        if (ret && Number.isFinite(ret.x) && Number.isFinite(ret.y)) {
+          return { x: ret.x, y: ret.y };
+        }
+      } catch {}
+    }
+    try {
+      if (typeof node.convertToWorldSpaceAR === "function") {
+        const cc = getCocos();
+        const vec = cc?.v2 ? cc.v2(x, y) : makeVec3(x, y, 0);
+        const ret = node.convertToWorldSpaceAR(vec);
+        if (ret && Number.isFinite(ret.x) && Number.isFinite(ret.y)) {
+          return { x: ret.x, y: ret.y };
+        }
+      }
+    } catch {}
+    try {
+      if (typeof node.getWorldMatrix === "function") {
+        const cc = getCocos();
+        const Mat4 = cc?.math?.Mat4 || cc?.Mat4;
+        const Vec3 = cc?.math?.Vec3 || cc?.Vec3;
+        if (typeof Mat4 === "function" && typeof Vec3 === "function") {
+          const mat = new Mat4();
+          node.getWorldMatrix(mat);
+          const out = new Vec3();
+          if (typeof Vec3.transformMat4 === "function") {
+            Vec3.transformMat4(out, new Vec3(x, y, 0), mat);
+          } else if (typeof mat.transformPoint === "function") {
+            mat.transformPoint(out, new Vec3(x, y, 0));
+          }
+          if (Number.isFinite(out.x) && Number.isFinite(out.y)) {
+            return { x: out.x, y: out.y };
+          }
+        }
+      }
+    } catch {}
+    let wp = null;
+    try {
+      wp = node.worldPosition;
+      if (!wp && typeof node.getWorldPosition === "function") wp = node.getWorldPosition();
+    } catch {}
+    wp = wp || { x: 0, y: 0 };
+    return { x: (Number(wp.x) || 0) + x, y: (Number(wp.y) || 0) + y };
+  }
+
+  function worldPointToCss(x, y, node) {
+    const wx = Number(x);
+    const wy = Number(y);
+    if (!Number.isFinite(wx) || !Number.isFinite(wy)) return null;
+
+    // Reuse the node-highlight projector: a tiny world rect around the bone.
+    // worldRectToCss already picks the correct worldToScreen argument order.
+    const probe = 24;
+    const css = worldRectToCss(
+      { x: wx - probe / 2, y: wy - probe / 2, width: probe, height: probe },
+      node
+    );
+    if (css) {
+      return {
+        x: css.left + css.width / 2,
+        y: css.top + css.height / 2,
+      };
+    }
+
+    const canvas = getGameCanvas();
+    if (!canvas) return null;
+    const canvasRect = canvas.getBoundingClientRect();
+    if (!canvasRect.width || !canvasRect.height) return null;
+
+    const bufferW = canvas.width || canvasRect.width;
+    const bufferH = canvas.height || canvasRect.height;
+    const scaleX = canvasRect.width / bufferW;
+    const scaleY = canvasRect.height / bufferH;
+
+    const camera = findCameraForNode(node);
+    const order = camera ? pickWorldToScreenOrder(camera, wx, wy) : null;
+    const pick = order ? callWorldToScreen(camera, wx, wy, order) : null;
+    if (pick) {
+      return {
+        x: canvasRect.left + pick.x * scaleX,
+        y: canvasRect.top + (bufferH - pick.y) * scaleY,
+      };
+    }
+
+    const cc = getCocos();
+    const view = cc?.view;
+    const visible = view?.getVisibleSize?.() || { width: canvasRect.width, height: canvasRect.height };
+    const origin = view?.getVisibleOrigin?.() || { x: 0, y: 0 };
+    const sx = canvasRect.width / (visible.width || 1);
+    const sy = canvasRect.height / (visible.height || 1);
+    return {
+      x: canvasRect.left + (wx - origin.x) * sx,
+      y: canvasRect.top + (visible.height - (wy - origin.y)) * sy,
+    };
+  }
+
+  function getBoneLocalPoint(bone, runtime) {
+    return getBoneSkeletonPoint(bone, runtime);
+  }
+
+  function getBoneTipLocal(bone, runtime) {
+    return getBoneSkeletonTip(bone, runtime);
+  }
+
+  function ensureBoneHighlightEl() {
+    ensureHighlightEl();
+    let el = document.getElementById(BONE_HIGHLIGHT_EL_ID);
+    if (!el) {
+      el = document.createElement("div");
+      el.id = BONE_HIGHLIGHT_EL_ID;
+      el.innerHTML = `
+        <svg>
+          <line class="shaft" x1="0" y1="0" x2="0" y2="0"></line>
+          <circle class="joint" cx="0" cy="0" r="6"></circle>
+          <circle class="tip" cx="0" cy="0" r="3"></circle>
+        </svg>
+        <div class="animtracer-bone-label"></div>
+      `;
+      document.documentElement.appendChild(el);
+    }
+    return el;
+  }
+
+  function updateNodeHighlightFrame() {
     const node = getNodeByUuid(highlightUuid);
     const el = ensureHighlightEl();
+    hideBoneHighlightEl();
     if (!node || node.isValid === false) {
       el.style.display = "none";
       return;
@@ -2202,7 +2674,81 @@
     el.style.height = `${cssRect.height}px`;
     const label = el.querySelector(".animtracer-hl-label");
     if (label) label.textContent = node.name || "(unnamed)";
+  }
 
+  function updateBoneHighlightFrame() {
+    hideNodeHighlightEl();
+    const el = ensureBoneHighlightEl();
+    const node = getNodeByUuid(highlightUuid);
+    if (!node || node.isValid === false) {
+      el.style.display = "none";
+      return;
+    }
+
+    const spine = getSkeletonComponent(node, highlightComponentIndex);
+    const runtime = getRuntimeSkeleton(spine);
+    ensureRuntimeWorldUpToDate(spine, runtime);
+    const bone = findBoneByName(runtime, highlightBoneName);
+    if (!bone) {
+      el.style.display = "none";
+      return;
+    }
+
+    const originLocal = getBoneSkeletonPoint(bone, runtime);
+    const tipLocal = getBoneSkeletonTip(bone, runtime);
+    const originWorld = skeletonPointToNodeWorld(spine, node, originLocal);
+    const tipWorld = skeletonPointToNodeWorld(spine, node, tipLocal);
+    const originCss = worldPointToCss(originWorld.x, originWorld.y, node);
+    const tipCss = worldPointToCss(tipWorld.x, tipWorld.y, node);
+    if (!originCss || !tipCss) {
+      el.style.display = "none";
+      return;
+    }
+
+    el.style.display = "block";
+    const svg = el.querySelector("svg");
+    if (svg) {
+      const w = window.innerWidth || document.documentElement.clientWidth || 0;
+      const h = window.innerHeight || document.documentElement.clientHeight || 0;
+      svg.setAttribute("width", String(w));
+      svg.setAttribute("height", String(h));
+      svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+    }
+    const line = el.querySelector("line.shaft");
+    const joint = el.querySelector("circle.joint");
+    const tip = el.querySelector("circle.tip");
+    const label = el.querySelector(".animtracer-bone-label");
+    if (line) {
+      line.setAttribute("x1", String(originCss.x));
+      line.setAttribute("y1", String(originCss.y));
+      line.setAttribute("x2", String(tipCss.x));
+      line.setAttribute("y2", String(tipCss.y));
+    }
+    if (joint) {
+      joint.setAttribute("cx", String(originCss.x));
+      joint.setAttribute("cy", String(originCss.y));
+    }
+    if (tip) {
+      tip.setAttribute("cx", String(tipCss.x));
+      tip.setAttribute("cy", String(tipCss.y));
+    }
+    if (label) {
+      label.textContent = highlightBoneName || getBoneName(bone) || "bone";
+      label.style.left = `${originCss.x}px`;
+      label.style.top = `${originCss.y}px`;
+    }
+  }
+
+  function updateHighlightFrame() {
+    if (highlightKind === "bone" && highlightUuid && highlightBoneName) {
+      updateBoneHighlightFrame();
+    } else if (highlightKind === "node" && highlightUuid) {
+      updateNodeHighlightFrame();
+    } else {
+      hideNodeHighlightEl();
+      hideBoneHighlightEl();
+      return;
+    }
     highlightRaf = requestAnimationFrame(updateHighlightFrame);
   }
 
@@ -2212,21 +2758,48 @@
     const node = getNodeByUuid(id);
     if (!node) return { ok: false, error: "Node not found" };
 
+    highlightKind = "node";
     highlightUuid = id;
-    if (highlightRaf) cancelAnimationFrame(highlightRaf);
-    highlightRaf = requestAnimationFrame(updateHighlightFrame);
+    highlightBoneName = null;
+    highlightComponentIndex = null;
+    startHighlightLoop();
     return { ok: true, name: node.name || "(unnamed)" };
   }
 
+  function highlightSkeletonBone(nodeUuid, boneName, componentIndex = null) {
+    const id = String(nodeUuid || "").trim();
+    const name = String(boneName || "").trim();
+    if (!id) return { ok: false, error: "UUID required" };
+    if (!name) return { ok: false, error: "Bone name required" };
+    const node = getNodeByUuid(id);
+    if (!node) return { ok: false, error: "Node not found" };
+    const spine = getSkeletonComponent(node, componentIndex);
+    if (!spine) return { ok: false, error: "No Spine/Skeleton component" };
+    const bone = findBoneByName(getRuntimeSkeleton(spine), name);
+    if (!bone) return { ok: false, error: `Bone not found: ${name}` };
+
+    highlightKind = "bone";
+    highlightUuid = id;
+    highlightBoneName = name;
+    highlightComponentIndex = Number.isFinite(Number(componentIndex)) ? Number(componentIndex) : null;
+    startHighlightLoop();
+    return { ok: true, name };
+  }
+
   function clearNodeHighlight() {
+    highlightKind = null;
     highlightUuid = null;
-    if (highlightRaf) {
-      cancelAnimationFrame(highlightRaf);
-      highlightRaf = 0;
-    }
-    const el = document.getElementById(HIGHLIGHT_EL_ID);
-    if (el) el.style.display = "none";
+    highlightBoneName = null;
+    highlightComponentIndex = null;
+    stopHighlightLoop();
+    hideNodeHighlightEl();
+    hideBoneHighlightEl();
     return { ok: true };
+  }
+
+  function clearSkeletonBoneHighlight() {
+    if (highlightKind !== "bone") return { ok: true };
+    return clearNodeHighlight();
   }
 
   function setupPauseKeyboardShortcut() {
@@ -2305,6 +2878,9 @@
     traceSpineAnimation,
     clearSpineAnimationTrace,
     getSpineAnimationNames,
+    getSkeletonBoneTree,
+    highlightSkeletonBone,
+    clearSkeletonBoneHighlight,
     setGameSpeed,
     getGameSpeed,
     togglePauseResume,
