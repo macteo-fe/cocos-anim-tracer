@@ -1077,10 +1077,38 @@ body.resizing {
   color: var(--text);
 }
 
+.bone-tree-filter {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.bone-tree-filter input {
+  width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg2);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+}
+
+.bone-tree-filter input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .bone-tree {
   max-height: 240px;
   overflow: auto;
   padding: 4px 0;
+}
+
+.bone-tree.resizable {
+  height: 240px;
+  min-height: 80px;
+  max-height: 60vh;
+  resize: vertical;
 }
 
 .bone-tree.empty {

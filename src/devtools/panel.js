@@ -73,6 +73,7 @@ let boneTreeCount = 0;
 let boneTreeStatus = "idle"; // idle | loading | ready | error
 let boneTreeError = "";
 let boneTreeCollapsed = new Set();
+let boneNameFilter = "";
 let hoverBoneName = null;
 let hoverBoneTimer = null;
 let clearBoneTimer = null;
@@ -80,6 +81,9 @@ let componentPropListHeight = null;
 let componentPropListResizing = false;
 let componentPropListScrollTop = 0;
 let nodePropListScrollTop = 0;
+let boneTreeHeight = null;
+let boneTreeResizing = false;
+let boneTreeScrollTop = 0;
 let detailRenderTimer = null;
 let detailPointerActive = false;
 let detailRefreshPending = false;
@@ -806,6 +810,7 @@ function resetBoneTreeState() {
   boneTreeStatus = "idle";
   boneTreeError = "";
   boneTreeCollapsed = new Set();
+  boneNameFilter = "";
   hoverBoneName = null;
   if (hoverBoneTimer) {
     clearTimeout(hoverBoneTimer);
@@ -1436,14 +1441,22 @@ function isEditingComponentProperty() {
   return !!(active && detailEl.contains(active) && active.classList.contains("prop-value"));
 }
 
+function isEditingBoneSearch() {
+  const active = document.activeElement;
+  return !!(active && active.id === "bone-tree-search");
+}
+
 function isDetailInteractionLocked() {
-  return isEditingComponentProperty() || detailPointerActive || componentPropListResizing || !!hoverBoneName;
+  return isEditingComponentProperty() || isEditingBoneSearch() || detailPointerActive || componentPropListResizing || boneTreeResizing || !!hoverBoneName;
 }
 
 function releaseDetailPointerLock() {
   detailPointerActive = false;
   if (componentPropListResizing) {
     persistComponentPropListHeight();
+  }
+  if (boneTreeResizing) {
+    persistBoneTreeHeight();
   }
   // Wait a tick so click-to-focus on inputs can settle before we decide.
   setTimeout(flushDetailRefreshIfIdle, 0);
@@ -1476,6 +1489,8 @@ function capturePropListScroll() {
   if (componentList) componentPropListScrollTop = componentList.scrollTop;
   const nodeList = document.getElementById("node-prop-list");
   if (nodeList) nodePropListScrollTop = nodeList.scrollTop;
+  const boneTree = document.getElementById("bone-tree");
+  if (boneTree) boneTreeScrollTop = boneTree.scrollTop;
 }
 
 function restorePropListScroll() {
@@ -1484,6 +1499,8 @@ function restorePropListScroll() {
     if (componentList) componentList.scrollTop = componentPropListScrollTop;
     const nodeList = document.getElementById("node-prop-list");
     if (nodeList) nodeList.scrollTop = nodePropListScrollTop;
+    const boneTree = document.getElementById("bone-tree");
+    if (boneTree) boneTree.scrollTop = boneTreeScrollTop;
   };
   restore();
   requestAnimationFrame(restore);
@@ -1661,18 +1678,58 @@ function renderNodePropertiesHtml() {
   `;
 }
 
+function getBoneNameFilter() {
+  return String(boneNameFilter || "").trim().toLowerCase();
+}
+
+function boneMatchesSelf(bone) {
+  const q = getBoneNameFilter();
+  if (!q) return true;
+  return String(bone?.name || "").toLowerCase().includes(q);
+}
+
+function boneMatchesTree(bone) {
+  if (!bone) return false;
+  if (boneMatchesSelf(bone)) return true;
+  const children = Array.isArray(bone.children) ? bone.children : [];
+  return children.some(boneMatchesTree);
+}
+
+function countMatchingBones(bones) {
+  let count = 0;
+  const walk = (list) => {
+    for (const bone of list || []) {
+      if (boneMatchesSelf(bone)) count++;
+      walk(bone.children);
+    }
+  };
+  walk(bones);
+  return count;
+}
+
+function getBoneTreeTitleText() {
+  if (!boneTreeCount) return "Skeleton bones";
+  const q = getBoneNameFilter();
+  if (!q) return `Skeleton bones (${boneTreeCount})`;
+  return `Skeleton bones (${countMatchingBones(boneTree)}/${boneTreeCount})`;
+}
+
 function renderBoneNode(bone, depth, container) {
   if (!bone) return;
+  const queryActive = !!getBoneNameFilter();
+  if (queryActive && !boneMatchesTree(bone)) return;
   const children = Array.isArray(bone.children) ? bone.children : [];
   const hasChildren = children.length > 0;
   const collapsed = boneTreeCollapsed.has(bone.name);
-  const isExpanded = hasChildren && !collapsed;
+  const isExpanded = hasChildren && (queryActive ? children.some(boneMatchesTree) : !collapsed);
+  const isDirectMatch = queryActive && boneMatchesSelf(bone);
 
   const nodeEl = document.createElement("div");
   nodeEl.className = "tree-node";
 
   const row = document.createElement("div");
   row.className = "tree-row bone-row";
+  if (isDirectMatch) row.classList.add("filter-match");
   row.dataset.boneName = bone.name;
   row.style.paddingLeft = `${depth * 12 + 4}px`;
 
@@ -1685,8 +1742,7 @@ function renderBoneNode(bone, depth, container) {
     if (!hasChildren) return;
     if (collapsed) boneTreeCollapsed.delete(bone.name);
     else boneTreeCollapsed.add(bone.name);
-    const node = hierarchy?.tree && selectedUuid ? findNode(hierarchy.tree, selectedUuid) : null;
-    if (node) scheduleRenderDetail(node, { immediate: true });
+    renderBoneTreeContents();
   });
 
   const icon = document.createElement("span");
@@ -1717,6 +1773,7 @@ function renderBoneNode(bone, depth, container) {
 
 function renderBoneTreeHtml() {
   if (!boneTreeOpen || boneTreeUuid !== selectedUuid) return "";
+  const heightStyle = boneTreeHeight ? `style="height:${boneTreeHeight}px"` : "";
   if (boneTreeStatus === "loading" || boneTreeStatus === "idle") {
     return `
       <div class="bone-tree-panel" id="bone-tree-panel">
@@ -1724,7 +1781,7 @@ function renderBoneTreeHtml() {
           <h2>Skeleton bones</h2>
           <button type="button" id="btn-close-bone-tree" title="Close bone tree">✕</button>
         </div>
-        <div class="bone-tree empty">Loading bones…</div>
+        <div class="bone-tree resizable empty" id="bone-tree" ${heightStyle}>Loading bones…</div>
       </div>
     `;
   }
@@ -1735,19 +1792,59 @@ function renderBoneTreeHtml() {
           <h2>Skeleton bones</h2>
           <button type="button" id="btn-close-bone-tree" title="Close bone tree">✕</button>
         </div>
-        <div class="bone-tree empty">${escapeHtml(boneTreeError || "Failed to load bones.")}</div>
+        <div class="bone-tree resizable empty" id="bone-tree" ${heightStyle}>${escapeHtml(boneTreeError || "Failed to load bones.")}</div>
       </div>
     `;
   }
   return `
     <div class="bone-tree-panel" id="bone-tree-panel">
       <div class="bone-tree-header">
-        <h2>Skeleton bones${boneTreeCount ? ` (${boneTreeCount})` : ""}</h2>
+        <h2 id="bone-tree-title">${escapeHtml(getBoneTreeTitleText())}</h2>
         <button type="button" id="btn-close-bone-tree" title="Close bone tree">✕</button>
       </div>
-      <div class="bone-tree" id="bone-tree"></div>
+      <div class="bone-tree-filter">
+        <input
+          type="search"
+          id="bone-tree-search"
+          placeholder="Filter by name…"
+          value="${escapeHtml(boneNameFilter)}"
+          autocomplete="off"
+          spellcheck="false"
+        />
+      </div>
+      <div class="bone-tree resizable" id="bone-tree" ${heightStyle}></div>
     </div>
   `;
+}
+
+function renderBoneTreeContents() {
+  const tree = document.getElementById("bone-tree");
+  if (!tree || boneTreeStatus !== "ready") return;
+  if (!Array.isArray(boneTree) || !boneTree.length) return;
+
+  tree.classList.remove("empty");
+  tree.innerHTML = "";
+  const query = String(boneNameFilter || "").trim();
+  const hasVisible = !query || boneTree.some(boneMatchesTree);
+  if (!hasVisible) {
+    tree.classList.add("empty");
+    tree.textContent = `No bones match "${query}".`;
+  } else {
+    for (const bone of boneTree) renderBoneNode(bone, 0, tree);
+  }
+
+  const title = document.getElementById("bone-tree-title");
+  if (title) title.textContent = getBoneTreeTitleText();
+}
+
+function bindBoneTreeSearch() {
+  const input = document.getElementById("bone-tree-search");
+  if (!input) return;
+  input.addEventListener("input", () => {
+    boneNameFilter = input.value;
+    renderBoneTreeContents();
+  });
+  input.addEventListener("keydown", (event) => event.stopPropagation());
 }
 
 function bindBoneTree() {
@@ -1761,10 +1858,8 @@ function bindBoneTree() {
       if (node) scheduleRenderDetail(node, { immediate: true });
     });
   }
-  const tree = document.getElementById("bone-tree");
-  if (!tree || !Array.isArray(boneTree) || !boneTree.length) return;
-  tree.innerHTML = "";
-  for (const bone of boneTree) renderBoneNode(bone, 0, tree);
+  bindBoneTreeSearch();
+  renderBoneTreeContents();
 }
 
 function openBoneTree(node, componentIndex) {
@@ -1782,6 +1877,7 @@ function openBoneTree(node, componentIndex) {
   boneTreeStatus = "loading";
   boneTreeError = "";
   boneTreeCollapsed = new Set();
+  boneNameFilter = "";
   scheduleRenderDetail(node, { immediate: true });
   evalInPage(EVAL_GET_SKELETON_BONES(node.uuid, componentIndex), (result, err) => {
     if (!boneTreeOpen || boneTreeUuid !== node.uuid || selectedUuid !== node.uuid) return;
@@ -2083,6 +2179,7 @@ function renderDetail(node) {
   });
 
   bindBoneTree();
+  bindBoneTreeResize();
   bindPropertyEditors(node);
   bindComponentPropListResize();
   bindNodePropListScroll();
@@ -2108,6 +2205,23 @@ function bindComponentPropListResize() {
   }, { passive: true });
 }
 
+function bindBoneTreeResize() {
+  const tree = document.getElementById("bone-tree");
+  if (!tree) return;
+
+  if (boneTreeHeight) {
+    tree.style.height = `${boneTreeHeight}px`;
+  }
+
+  tree.addEventListener("pointerdown", () => {
+    boneTreeResizing = true;
+    markDetailPointerActive();
+  });
+  tree.addEventListener("scroll", () => {
+    boneTreeScrollTop = tree.scrollTop;
+  }, { passive: true });
+}
+
 function bindNodePropListScroll() {
   const list = document.getElementById("node-prop-list");
   if (!list) return;
@@ -2124,6 +2238,15 @@ function persistComponentPropListHeight() {
   if (!list) return;
   const height = Math.round(list.offsetHeight);
   if (height > 0) componentPropListHeight = height;
+}
+
+function persistBoneTreeHeight() {
+  if (!boneTreeResizing) return;
+  boneTreeResizing = false;
+  const tree = document.getElementById("bone-tree");
+  if (!tree) return;
+  const height = Math.round(tree.offsetHeight);
+  if (height > 0) boneTreeHeight = height;
 }
 
 if (!window.__animTracerPropListResizeBound) {
