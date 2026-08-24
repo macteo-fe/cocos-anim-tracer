@@ -74,6 +74,7 @@ let boneTreeStatus = "idle"; // idle | loading | ready | error
 let boneTreeError = "";
 let boneTreeCollapsed = new Set();
 let boneNameFilter = "";
+let selectedBoneName = null;
 let hoverBoneName = null;
 let hoverBoneTimer = null;
 let clearBoneTimer = null;
@@ -726,11 +727,52 @@ function clearNodeHighlightInGame() {
   clearHighlightTimer = setTimeout(() => {
     clearHighlightTimer = null;
     hoverHighlightUuid = null;
-    evalInPage(EVAL_CLEAR_HIGHLIGHT, () => {});
+    evalInPage(EVAL_CLEAR_HIGHLIGHT, () => {
+      if (selectedBoneName) persistSelectedBoneHighlight();
+    });
   }, 40);
 }
 
+function persistSelectedBoneHighlight() {
+  if (!selectedBoneName || !boneTreeUuid) return;
+  evalInPage(
+    EVAL_HIGHLIGHT_BONE(boneTreeUuid, selectedBoneName, boneTreeComponentIndex),
+    () => {}
+  );
+}
+
+function toggleBoneSelection(boneName) {
+  const name = String(boneName || "").trim();
+  if (!name || !boneTreeUuid) return;
+  if (clearBoneTimer) {
+    clearTimeout(clearBoneTimer);
+    clearBoneTimer = null;
+  }
+  if (hoverBoneTimer) {
+    clearTimeout(hoverBoneTimer);
+    hoverBoneTimer = null;
+  }
+  hoverBoneName = null;
+  if (selectedBoneName === name) {
+    selectedBoneName = null;
+    evalInPage(EVAL_CLEAR_BONE_HIGHLIGHT, () => {});
+    setToolStatus("Bone highlight cleared.", "ok");
+  } else {
+    selectedBoneName = name;
+    persistSelectedBoneHighlight();
+    setToolStatus(`Pinned bone "${name}" in game. Click again to clear.`, "ok");
+  }
+  updateBoneSelectionUi();
+}
+
+function updateBoneSelectionUi() {
+  document.querySelectorAll(".bone-row").forEach((row) => {
+    row.classList.toggle("selected", row.dataset.boneName === selectedBoneName);
+  });
+}
+
 function scheduleNodeHighlight(uuid) {
+  if (selectedBoneName) return;
   if (clearHighlightTimer) {
     clearTimeout(clearHighlightTimer);
     clearHighlightTimer = null;
@@ -781,7 +823,11 @@ function clearBoneHighlightInGame() {
   clearBoneTimer = setTimeout(() => {
     clearBoneTimer = null;
     hoverBoneName = null;
-    evalInPage(EVAL_CLEAR_BONE_HIGHLIGHT, () => {});
+    if (selectedBoneName) {
+      persistSelectedBoneHighlight();
+    } else {
+      evalInPage(EVAL_CLEAR_BONE_HIGHLIGHT, () => {});
+    }
   }, 40);
 }
 
@@ -811,6 +857,7 @@ function resetBoneTreeState() {
   boneTreeError = "";
   boneTreeCollapsed = new Set();
   boneNameFilter = "";
+  selectedBoneName = null;
   hoverBoneName = null;
   if (hoverBoneTimer) {
     clearTimeout(hoverBoneTimer);
@@ -1730,7 +1777,9 @@ function renderBoneNode(bone, depth, container) {
   const row = document.createElement("div");
   row.className = "tree-row bone-row";
   if (isDirectMatch) row.classList.add("filter-match");
+  if (selectedBoneName === bone.name) row.classList.add("selected");
   row.dataset.boneName = bone.name;
+  row.title = "Click to pin/unpin bone highlight in game";
   row.style.paddingLeft = `${depth * 12 + 4}px`;
 
   const toggle = document.createElement("span");
@@ -1756,6 +1805,10 @@ function renderBoneNode(bone, depth, container) {
   row.appendChild(toggle);
   row.appendChild(icon);
   row.appendChild(name);
+  row.addEventListener("click", (event) => {
+    if (event.target.closest(".toggle")) return;
+    toggleBoneSelection(bone.name);
+  });
   row.addEventListener("mouseenter", () => {
     scheduleBoneHighlight(boneTreeUuid, bone.name, boneTreeComponentIndex);
   });
@@ -1860,6 +1913,7 @@ function bindBoneTree() {
   }
   bindBoneTreeSearch();
   renderBoneTreeContents();
+  if (selectedBoneName) persistSelectedBoneHighlight();
 }
 
 function openBoneTree(node, componentIndex) {
@@ -1878,6 +1932,7 @@ function openBoneTree(node, componentIndex) {
   boneTreeError = "";
   boneTreeCollapsed = new Set();
   boneNameFilter = "";
+  selectedBoneName = null;
   scheduleRenderDetail(node, { immediate: true });
   evalInPage(EVAL_GET_SKELETON_BONES(node.uuid, componentIndex), (result, err) => {
     if (!boneTreeOpen || boneTreeUuid !== node.uuid || selectedUuid !== node.uuid) return;

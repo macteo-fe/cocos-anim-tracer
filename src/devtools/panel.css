@@ -1118,8 +1118,21 @@ body.resizing {
   font-style: italic;
 }
 
+.bone-row {
+  cursor: pointer;
+}
+
 .bone-row:hover > .node-name {
   color: var(--spine);
+}
+
+.bone-row.selected {
+  background: var(--accent-bg-selected);
+}
+
+.bone-row.selected > .node-name {
+  color: var(--spine);
+  font-weight: 600;
 }
 
 .component-props {
