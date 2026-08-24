@@ -329,6 +329,14 @@ const EVAL_GET_NODE_BREAKS = `(() => {
   return bridge.getNodeEventBreaks();
 })()`;
 
+const EVAL_GET_NODE_BREAK_TYPES = `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.getNodeEventBreakTypes !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page", types: [] };
+  }
+  return bridge.getNodeEventBreakTypes();
+})()`;
+
 const EVAL_HIGHLIGHT_NODE = (uuid) => `(() => {
   const bridge = window.__cocosHierarchyBridge__;
   if (!bridge || typeof bridge.highlightNode !== "function") {
@@ -446,21 +454,69 @@ function updateBreakNodeTargetLabel(node = null) {
   breakNodeTargetEl.title = label;
 }
 
+const BREAK_EVENT_LABELS = {
+  "size-changed": "size changed",
+  "transform-changed": "transform changed",
+  "position-changed": "position changed",
+  "rotation-changed": "rotation changed",
+  "scale-changed": "scale changed",
+  "color-changed": "color changed",
+  "layer-changed": "layer changed",
+  "child-reorder": "child reorder",
+  "sibling-order-changed": "sibling order changed",
+  "active-changed": "active changed",
+  "destroyed": "destroyed",
+  "parent-changed": "parent changed",
+  "child-added": "child added",
+  "child-removed": "child removed",
+  "component-added": "component added",
+  "component-removed": "component removed",
+  "parent-change": "parent changed",
+  "active-change": "active changed",
+  "add-child": "child added",
+  "remove-child": "child removed",
+  "transform-change": "transform changed",
+};
+
 function formatBreakEventType(eventType) {
-  switch (eventType) {
-    case "parent-change":
-      return "parent-change";
-    case "active-change":
-      return "active-change";
-    case "add-child":
-      return "add-child";
-    case "remove-child":
-      return "remove-child";
-    case "transform-change":
-      return "transform-change";
-    default:
-      return eventType || "unknown";
+  return BREAK_EVENT_LABELS[eventType] || eventType || "unknown";
+}
+
+function populateBreakEventTypes(types, engine = "") {
+  const current = breakEventTypeEl.value;
+  const enabled = (Array.isArray(types) ? types : []).filter((item) => item && item.enabled && item.id);
+  breakEventTypeEl.innerHTML = "";
+  if (!enabled.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = engine ? `No events for CC ${engine}` : "Waiting for Cocos…";
+    breakEventTypeEl.appendChild(option);
+    breakEventTypeEl.disabled = true;
+    return;
   }
+  breakEventTypeEl.disabled = false;
+  for (const item of enabled) {
+    const option = document.createElement("option");
+    option.value = item.id;
+    option.textContent = item.label || formatBreakEventType(item.id);
+    if (item.engineKey) option.title = item.engineKey;
+    breakEventTypeEl.appendChild(option);
+  }
+  if ([...breakEventTypeEl.options].some((option) => option.value === current)) {
+    breakEventTypeEl.value = current;
+  }
+}
+
+function loadNodeBreakEventTypes(force = false) {
+  const alreadyLoaded = [...breakEventTypeEl.options].some((option) => option.value);
+  if (!force && alreadyLoaded) return;
+  evalInPage(EVAL_GET_NODE_BREAK_TYPES, (result) => {
+    if (!result?.ok) {
+      populateBreakEventTypes([], "");
+      return;
+    }
+    populateBreakEventTypes(result.types || [], result.engine || "");
+  });
 }
 
 function renderNodeBreakList(items) {
@@ -476,8 +532,10 @@ function renderNodeBreakList(items) {
     const target = entry.uuid === "*" ? "all nodes" : entry.uuid;
     const row = document.createElement("div");
     row.className = "node-break-item";
+    const typeLabel = entry.label || formatBreakEventType(entry.eventType);
+    const typeTitle = entry.engineKey ? `${typeLabel} (${entry.engineKey})` : typeLabel;
     row.innerHTML = `
-      <span class="node-break-type">${escapeHtml(formatBreakEventType(entry.eventType))}</span>
+      <span class="node-break-type" title="${escapeHtml(typeTitle)}">${escapeHtml(typeLabel)}</span>
       <span class="node-break-target" title="${escapeHtml(target)}">@ ${escapeHtml(target)}</span>
     `;
     const removeBtn = document.createElement("button");
@@ -2384,6 +2442,7 @@ function refresh() {
           lastHierarchyRaw = "";
           hierarchy = { ok: false, error: err };
           setStatus(err, "error");
+          populateBreakEventTypes([], "");
           renderTree();
           return;
         }
@@ -2392,11 +2451,13 @@ function refresh() {
         hierarchy = result;
         if (!result?.ok) {
           setStatus(result?.error || "Cocos not ready", "error");
+          populateBreakEventTypes([], "");
           renderTree();
           return;
         }
 
         setStatus(`${result.sceneName} · CC ${result.engineVersion}`, "ok");
+        loadNodeBreakEventTypes();
         updateComponentFilterOptions();
         ensureExpandedForMarkedNode(hierarchy.tree);
         refreshSelectedNodeInspector(true);

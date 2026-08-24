@@ -701,6 +701,13 @@ body.resizing {
   cursor: pointer;
 }
 
+.break-hint {
+  margin: 6px 0 0;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
 .node-break-list {
   margin-top: 6px;
   border: 1px solid var(--border);

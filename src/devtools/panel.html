@@ -114,14 +114,11 @@
             <label for="break-event-type">Node event breaks</label>
             <div class="break-target" id="break-node-target">Not selected</div>
             <div class="tool-row">
-              <select id="break-event-type" title="Event type">
-                <option value="parent-change">Parent change</option>
-                <option value="active-change">Active change</option>
-                <option value="add-child">Add child</option>
-                <option value="remove-child">Remove child</option>
-                <option value="transform-change">Transform change</option>
+              <select id="break-event-type" title="Cocos Node.EventType">
+                <option value="">Loading events…</option>
               </select>
             </div>
+            <p class="break-hint">Listens on engine Node.EventType (CC2/CC3), then pauses with debugger.</p>
             <div class="tool-row break-actions">
               <button id="btn-add-node-break" type="button">Add break</button>
               <button id="btn-clear-node-breaks" type="button">Clear breaks</button>
