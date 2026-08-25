@@ -18,6 +18,7 @@ It adds a custom DevTools tab named `AnimTracer` and shows:
 - Toggle node active state
 - Highlight Spine/Skeleton nodes
 - Select node and inspect from DevTools panel
+- Node event breaks on Cocos `Node.EventType` (CC2/CC3), pausing with `debugger`
 
 ## Requirements
 
@@ -43,6 +44,11 @@ It adds a custom DevTools tab named `AnimTracer` and shows:
 5. Use filters:
    - Search input for node name
    - Component dropdown for component-based filtering
+6. Node event breaks:
+   - Select a node, open Tools, pick an engine event, click **Add break**
+   - The list is filtered to events that engine version actually emits
+   - When the event fires, the page console logs it and DevTools pauses
+   - Reload the game page after updating the extension so the new bridge is injected
 
 ## Project Structure
 

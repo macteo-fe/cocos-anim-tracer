@@ -1,18 +1,116 @@
 (function () {
-  const BRIDGE_VERSION = 23;
+  const BRIDGE_VERSION = 24;
   // Always refresh bridge API so extension reloads apply even if an older
   // inject already set window.__cocosHierarchyBridge__.
 
   const nodeCache = new Map();
   const nodeEventBreakpoints = [];
-  const NODE_BREAK_EVENT_TYPES = new Set([
-    "parent-change",
-    "active-change",
-    "add-child",
-    "remove-child",
-    "transform-change",
-  ]);
-  const NODE_BREAK_HOOK_VERSION = 3;
+  const NODE_BREAK_EVENT_ALIASES = {
+    "parent-change": "parent-changed",
+    "active-change": "active-changed",
+    "add-child": "child-added",
+    "remove-child": "child-removed",
+    "transform-change": "transform-changed",
+  };
+  // Engine event names that Cocos actually emits (same mapping as cc-inspector).
+  const NODE_BREAK_EVENT_CATALOG = [
+    {
+      id: "size-changed",
+      label: "size changed",
+      v2: { enabled: true, key: (et) => et?.SIZE_CHANGED },
+      v3: { enabled: true, key: (et) => et?.SIZE_CHANGED },
+    },
+    {
+      id: "transform-changed",
+      label: "transform changed",
+      v2: { enabled: false, key: () => "" },
+      v3: { enabled: true, key: (et) => et?.TRANSFORM_CHANGED },
+    },
+    {
+      id: "position-changed",
+      label: "position changed",
+      v2: { enabled: true, key: (et) => et?.POSITION_CHANGED },
+      v3: { enabled: false, key: () => "" },
+    },
+    {
+      id: "rotation-changed",
+      label: "rotation changed",
+      v2: { enabled: true, key: (et) => et?.ROTATION_CHANGED },
+      v3: { enabled: false, key: () => "" },
+    },
+    {
+      id: "scale-changed",
+      label: "scale changed",
+      v2: { enabled: true, key: (et) => et?.SCALE_CHANGED },
+      v3: { enabled: false, key: () => "" },
+    },
+    {
+      id: "color-changed",
+      label: "color changed",
+      v2: { enabled: true, key: (et) => et?.COLOR_CHANGED },
+      v3: { enabled: true, key: (et) => et?.COLOR_CHANGED },
+    },
+    {
+      id: "layer-changed",
+      label: "layer changed",
+      v2: { enabled: false, key: () => "" },
+      v3: { enabled: true, key: (et) => et?.LAYER_CHANGED },
+    },
+    {
+      id: "child-reorder",
+      label: "child reorder",
+      v2: { enabled: true, key: (et) => et?.CHILDREN_ORDER_CHANGED || et?.CHILD_REORDER },
+      v3: { enabled: false, key: () => "" },
+    },
+    {
+      id: "sibling-order-changed",
+      label: "sibling order changed",
+      v2: { enabled: true, key: (et) => et?.SIBLING_ORDER_CHANGED },
+      v3: { enabled: true, key: (et) => et?.SIBLING_ORDER_CHANGED },
+    },
+    {
+      id: "active-changed",
+      label: "active changed",
+      v2: { enabled: true, key: () => "active-in-hierarchy-changed" },
+      v3: { enabled: true, key: (et) => et?.ACTIVE_CHANGED || et?.ACTIVE_IN_HIERARCHY_CHANGED },
+    },
+    {
+      id: "destroyed",
+      label: "destroyed",
+      v2: { enabled: false, key: () => "" },
+      v3: { enabled: true, key: (et) => et?.NODE_DESTROYED },
+    },
+    {
+      id: "parent-changed",
+      label: "parent changed",
+      v2: { enabled: false, key: () => "" },
+      v3: { enabled: true, key: (et) => et?.PARENT_CHANGED },
+    },
+    {
+      id: "child-added",
+      label: "child added",
+      v2: { enabled: false, key: () => "" },
+      v3: { enabled: true, key: (et) => et?.CHILD_ADDED },
+    },
+    {
+      id: "child-removed",
+      label: "child removed",
+      v2: { enabled: false, key: () => "" },
+      v3: { enabled: true, key: (et) => et?.CHILD_REMOVED },
+    },
+    {
+      id: "component-added",
+      label: "component added",
+      v2: { enabled: false, key: () => "" },
+      v3: { enabled: true, key: (et) => et?.COMPONENT_ADDED },
+    },
+    {
+      id: "component-removed",
+      label: "component removed",
+      v2: { enabled: false, key: () => "" },
+      v3: { enabled: true, key: (et) => et?.COMPONENT_REMOVED },
+    },
+  ];
   let bridgePaused = false;
   let bridgeGameSpeed = 1;
   try {
@@ -176,6 +274,7 @@
 
     nodeCache.clear();
     const tree = serializeNode(scene);
+    syncNodeEventBreaks();
     return {
       ok: true,
       engineVersion: cc.ENGINE_VERSION || "unknown",
@@ -1763,10 +1862,39 @@
     return { ok: true, paused: bridgePaused };
   }
 
-  function normalizeNodeBreakEventType(eventType) {
+  function getNodeEventTypeEnum(cc = getCocos()) {
+    return cc?.Node?.EventType || window.cc?.Node?.EventType || null;
+  }
+
+  function getNodeBreakCatalogItem(eventType) {
     const type = String(eventType || "").trim().toLowerCase();
-    if (!NODE_BREAK_EVENT_TYPES.has(type)) return "";
-    return type;
+    const normalized = NODE_BREAK_EVENT_ALIASES[type] || type;
+    return NODE_BREAK_EVENT_CATALOG.find((item) => item.id === normalized) || null;
+  }
+
+  function resolveNodeBreakEngineKey(eventType, cc = getCocos()) {
+    const item = getNodeBreakCatalogItem(eventType);
+    if (!item) return { ok: false, error: `Unsupported event type: ${String(eventType || "")}` };
+    const spec = isCocos2x(cc) ? item.v2 : item.v3;
+    if (!spec.enabled) {
+      const engine = isCocos2x(cc) ? "Cocos 2.x" : "Cocos 3.x";
+      return { ok: false, id: item.id, label: item.label, error: `${item.label} is not emitted on ${engine}` };
+    }
+    let engineKey = "";
+    try {
+      engineKey = String(spec.key(getNodeEventTypeEnum(cc)) || "").trim();
+    } catch {
+      engineKey = "";
+    }
+    if (!engineKey) {
+      return { ok: false, id: item.id, label: item.label, error: `Engine event key missing for ${item.label}` };
+    }
+    return { ok: true, id: item.id, label: item.label, engineKey };
+  }
+
+  function normalizeNodeBreakEventType(eventType) {
+    const item = getNodeBreakCatalogItem(eventType);
+    return item ? item.id : "";
   }
 
   function normalizeBreakUuid(uuid) {
@@ -1774,65 +1902,156 @@
     return id || "*";
   }
 
-  function getNodeEventBreaks() {
-    return {
-      ok: true,
-      breaks: nodeEventBreakpoints.map((entry, index) => ({
-        id: index,
-        uuid: entry.uuid,
-        eventType: entry.eventType,
-      })),
+  function collectSceneNodes() {
+    const scene = getCocos()?.director?.getScene?.();
+    const nodes = [];
+    const stack = scene ? [scene] : [];
+    while (stack.length) {
+      const node = stack.pop();
+      if (!node) continue;
+      if (node.name !== "__AnimTracerHL__") nodes.push(node);
+      const children = node.children || [];
+      for (let i = 0; i < children.length; i++) stack.push(children[i]);
+    }
+    return nodes;
+  }
+
+  function makeNodeEventBreakListener(eventType, engineKey, node) {
+    return function animTracerNodeEventBreak(...args) {
+      eval("console.log('[AnimTracer] node event', eventType, engineKey, node, args); debugger;");
     };
   }
 
-  function shouldBreakOnNodeEvent(node, eventType) {
-    const uuid = String(node?.uuid || "").trim();
-    for (const entry of nodeEventBreakpoints) {
-      if (entry.eventType !== eventType) continue;
-      if (entry.uuid === "*" || (uuid && entry.uuid === uuid)) return true;
+  function attachBreakToNode(entry, node) {
+    if (!entry?.engineKey || !node || node.name === "__AnimTracerHL__") return false;
+    if (node.isValid === false) return false;
+    if (typeof node.on !== "function") return false;
+    if (entry.listeners.some((item) => item.node === node)) return true;
+    const fn = makeNodeEventBreakListener(entry.eventType, entry.engineKey, node);
+    try {
+      node.on(entry.engineKey, fn);
+    } catch {
+      return false;
     }
-    return false;
+    entry.listeners.push({ node, fn, key: entry.engineKey });
+    return true;
   }
 
-  function triggerNodeEventBreak(node, eventType, detail = {}) {
-    if (!shouldBreakOnNodeEvent(node, eventType)) return;
-    const nodeName = node?.name || "(unnamed)";
-    const nodeUuid = String(node?.uuid || "");
-    console.groupCollapsed(
-      "%c AnimTracer %c Node event break ",
-      "background:#1a73e8;color:#fff;padding:1px 4px;border-radius:3px 0 0 3px;",
-      "background:#d93025;color:#fff;padding:1px 4px;border-radius:0 3px 3px 0;"
-    );
-    console.log("event:", eventType);
-    console.log("node:", node);
-    console.log("name:", nodeName);
-    console.log("uuid:", nodeUuid);
-    console.log("path:", getNodePath(node));
-    if (detail && Object.keys(detail).length) {
-      console.log("detail:", detail);
+  function detachBreakListeners(entry) {
+    if (!entry?.listeners?.length) {
+      if (entry) entry.listeners = [];
+      return;
     }
-    console.trace();
-    console.groupEnd();
-    debugger;
+    for (const item of entry.listeners) {
+      try {
+        if (item.node && item.node.isValid !== false && typeof item.node.off === "function") {
+          item.node.off(item.key, item.fn);
+        }
+      } catch {}
+    }
+    entry.listeners = [];
+  }
+
+  function nodesForBreakUuid(uuid) {
+    if (uuid === "*") return collectSceneNodes();
+    const node = getNodeByUuid(uuid);
+    return node ? [node] : [];
+  }
+
+  function serializeBreakEntry(entry, index) {
+    return {
+      id: index,
+      uuid: entry.uuid,
+      eventType: entry.eventType,
+      label: entry.label || entry.eventType,
+      engineKey: entry.engineKey || "",
+      listenerCount: entry.listeners?.length || 0,
+    };
+  }
+
+  function getNodeEventBreakTypes() {
+    const cc = getCocos();
+    if (!cc) return { ok: false, error: "Cocos runtime not found (window.cc)", types: [] };
+    const engine = isCocos2x(cc) ? "2.x" : "3.x";
+    const types = NODE_BREAK_EVENT_CATALOG.map((item) => {
+      const resolved = resolveNodeBreakEngineKey(item.id, cc);
+      return {
+        id: item.id,
+        label: item.label,
+        enabled: !!resolved.ok,
+        engineKey: resolved.engineKey || "",
+      };
+    });
+    return { ok: true, engine, types };
+  }
+
+  function getNodeEventBreaks() {
+    return {
+      ok: true,
+      breaks: nodeEventBreakpoints.map((entry, index) => serializeBreakEntry(entry, index)),
+    };
+  }
+
+  function syncNodeEventBreaks() {
+    for (const entry of nodeEventBreakpoints) {
+      entry.listeners = (entry.listeners || []).filter((item) => item.node && item.node.isValid !== false);
+      for (const node of nodesForBreakUuid(entry.uuid)) {
+        attachBreakToNode(entry, node);
+      }
+    }
   }
 
   function registerNodeEventBreak(uuid, eventType) {
-    const type = normalizeNodeBreakEventType(eventType);
-    if (!type) {
-      return { ok: false, error: `Unsupported event type: ${String(eventType || "")}` };
+    const resolved = resolveNodeBreakEngineKey(eventType);
+    if (!resolved.ok) {
+      return { ok: false, error: resolved.error || `Unsupported event type: ${String(eventType || "")}` };
     }
     const normalizedUuid = normalizeBreakUuid(uuid);
-    const exists = nodeEventBreakpoints.some(
-      (entry) => entry.uuid === normalizedUuid && entry.eventType === type
-    );
-    if (!exists) {
-      nodeEventBreakpoints.push({ uuid: normalizedUuid, eventType: type });
+    if (normalizedUuid !== "*") {
+      const node = getNodeByUuid(normalizedUuid);
+      if (!node) return { ok: false, error: `Node not found for UUID: ${normalizedUuid}` };
+      if (typeof node.on !== "function") {
+        return { ok: false, error: "Node.on is not available on this engine build" };
+      }
     }
+    const exists = nodeEventBreakpoints.find(
+      (entry) => entry.uuid === normalizedUuid && entry.eventType === resolved.id
+    );
+    if (exists) {
+      for (const node of nodesForBreakUuid(normalizedUuid)) {
+        attachBreakToNode(exists, node);
+      }
+      return {
+        ok: true,
+        added: false,
+        break: serializeBreakEntry(exists, nodeEventBreakpoints.indexOf(exists)),
+        breaks: nodeEventBreakpoints.map((entry, index) => serializeBreakEntry(entry, index)),
+      };
+    }
+    const entry = {
+      uuid: normalizedUuid,
+      eventType: resolved.id,
+      label: resolved.label,
+      engineKey: resolved.engineKey,
+      listeners: [],
+    };
+    const nodes = nodesForBreakUuid(normalizedUuid);
+    if (!nodes.length) {
+      return { ok: false, error: normalizedUuid === "*" ? "No active scene" : `Node not found for UUID: ${normalizedUuid}` };
+    }
+    let attached = 0;
+    for (const node of nodes) {
+      if (attachBreakToNode(entry, node)) attached += 1;
+    }
+    if (!attached) {
+      return { ok: false, error: `Failed to listen for ${resolved.label}` };
+    }
+    nodeEventBreakpoints.push(entry);
     return {
       ok: true,
-      added: !exists,
-      break: { uuid: normalizedUuid, eventType: type },
-      breaks: nodeEventBreakpoints.map((entry, index) => ({ id: index, ...entry })),
+      added: true,
+      break: serializeBreakEntry(entry, nodeEventBreakpoints.length - 1),
+      breaks: nodeEventBreakpoints.map((item, index) => serializeBreakEntry(item, index)),
     };
   }
 
@@ -1847,290 +2066,14 @@
       const entry = nodeEventBreakpoints[i];
       if (normalizedUuid != null && entry.uuid !== normalizedUuid) continue;
       if (normalizedType != null && entry.eventType !== normalizedType) continue;
+      detachBreakListeners(entry);
       nodeEventBreakpoints.splice(i, 1);
     }
     return {
       ok: true,
       cleared: before - nodeEventBreakpoints.length,
-      breaks: nodeEventBreakpoints.map((entry, index) => ({ id: index, ...entry })),
+      breaks: nodeEventBreakpoints.map((entry, index) => serializeBreakEntry(entry, index)),
     };
-  }
-
-  function hookNodeEventBreaks(cc) {
-    const nodeCtor = cc?.Node || cc?.scene?.Node || window.cc?.Node || window.cocos?.Node;
-    const proto = nodeCtor?.prototype;
-    if (!proto) return false;
-    const hookedVersion = Number(proto.__animTracerNodeEventBreakHookVersion || 0);
-    if (hookedVersion >= NODE_BREAK_HOOK_VERSION) return true;
-
-    function childInfo(child) {
-      return {
-        childUuid: String(child?.uuid || ""),
-        childName: String(child?.name || "(unnamed)"),
-      };
-    }
-
-    function wrapProtoMethod(methodName, beforeAfter) {
-      const original = proto[methodName];
-      if (typeof original !== "function" || original.__animTracerWrapped) return;
-      const wrapped = function (...args) {
-        const before = beforeAfter.before ? beforeAfter.before.call(this, args) : null;
-        const result = original.apply(this, args);
-        if (beforeAfter.after) beforeAfter.after.call(this, args, result, before);
-        return result;
-      };
-      wrapped.__animTracerWrapped = true;
-      try {
-        proto[methodName] = wrapped;
-      } catch {
-        // Non-writable prototype methods (some CC2 builds).
-      }
-    }
-
-    function wrapProtoSetter(propName, onChange) {
-      // CC2 Class properties are often non-configurable (e.g. eulerAngles) — skip those.
-      let desc = Object.getOwnPropertyDescriptor(proto, propName);
-      let targetProto = proto;
-      if (!desc) {
-        // CC2 keeps some accessors on _BaseNode.prototype, not Node.prototype.
-        let parentProto = Object.getPrototypeOf(proto);
-        while (parentProto && parentProto !== Object.prototype) {
-          desc = Object.getOwnPropertyDescriptor(parentProto, propName);
-          if (desc) {
-            targetProto = parentProto;
-            break;
-          }
-          parentProto = Object.getPrototypeOf(parentProto);
-        }
-      }
-      if (!desc || typeof desc.set !== "function" || desc.set.__animTracerWrapped) return;
-      if (desc.configurable === false) return;
-
-      const origGet = desc.get;
-      const origSet = desc.set;
-      const wrappedSet = function (value) {
-        const prev = typeof origGet === "function" ? origGet.call(this) : undefined;
-        const result = origSet.call(this, value);
-        const next = typeof origGet === "function" ? origGet.call(this) : value;
-        onChange.call(this, prev, next, value);
-        return result;
-      };
-      wrappedSet.__animTracerWrapped = true;
-      try {
-        Object.defineProperty(targetProto, propName, {
-          configurable: true,
-          enumerable: desc.enumerable,
-          get: origGet,
-          set: wrappedSet,
-        });
-      } catch {
-        // Property cannot be redefined on this engine build.
-      }
-    }
-
-    function transformsEqual(a, b) {
-      if (a === b) return true;
-      if (!a || !b || typeof a !== "object" || typeof b !== "object") return a === b;
-      return Number(a.x) === Number(b.x) && Number(a.y) === Number(b.y) && Number(a.z ?? 0) === Number(b.z ?? 0);
-    }
-
-    wrapProtoSetter("parent", function (prevParent, afterParent) {
-      const prevUuid = prevParent?.uuid || "";
-      const nextUuid = afterParent?.uuid || "";
-      if (prevUuid === nextUuid) return;
-      triggerNodeEventBreak(this, "parent-change", {
-        previousParentUuid: prevUuid,
-        nextParentUuid: nextUuid,
-        previousParentName: prevParent?.name || "",
-        nextParentName: afterParent?.name || "",
-      });
-    });
-
-    wrapProtoSetter("active", function (prev, next) {
-      if (isSceneNode(this)) return;
-      const prevActive = !!prev;
-      const nextActive = !!next;
-      if (prevActive === nextActive) return;
-      triggerNodeEventBreak(this, "active-change", {
-        previousActive: prevActive,
-        nextActive: nextActive,
-      });
-    });
-
-    wrapProtoMethod("setParent", {
-      before(args) {
-        return this.parent || this._parent || null;
-      },
-      after(args, result, prevParent) {
-        const nextParent = this.parent || this._parent || null;
-        const prevUuid = prevParent?.uuid || "";
-        const nextUuid = nextParent?.uuid || "";
-        if (prevUuid === nextUuid) return;
-        triggerNodeEventBreak(this, "parent-change", {
-          previousParentUuid: prevUuid,
-          nextParentUuid: nextUuid,
-          previousParentName: prevParent?.name || "",
-          nextParentName: nextParent?.name || "",
-        });
-      },
-    });
-
-    wrapProtoMethod("addChild", {
-      after(args) {
-        const child = args[0];
-        if (!child) return;
-        triggerNodeEventBreak(this, "add-child", childInfo(child));
-      },
-    });
-
-    wrapProtoMethod("insertChild", {
-      after(args) {
-        const child = args[0];
-        if (!child) return;
-        triggerNodeEventBreak(this, "add-child", {
-          ...childInfo(child),
-          siblingIndex: args[1],
-        });
-      },
-    });
-
-    wrapProtoMethod("removeChild", {
-      before(args) {
-        return args[0] || null;
-      },
-      after(args, result, child) {
-        if (!child) return;
-        triggerNodeEventBreak(this, "remove-child", childInfo(child));
-      },
-    });
-
-    wrapProtoMethod("removeAllChildren", {
-      before() {
-        return [...(this.children || [])];
-      },
-      after(args, result, children) {
-        if (!children?.length) return;
-        triggerNodeEventBreak(this, "remove-child", {
-          childCount: children.length,
-          children: children.map((child) => childInfo(child)),
-        });
-      },
-    });
-
-    wrapProtoMethod("removeFromParent", {
-      before() {
-        return this.parent || this._parent || null;
-      },
-      after(args, result, parent) {
-        if (!parent) return;
-        triggerNodeEventBreak(parent, "remove-child", childInfo(this));
-        // Also useful when watching the detached node itself via parent-change
-        // (covered by setParent/parent hooks in many engine paths).
-      },
-    });
-
-    wrapProtoMethod("setPosition", {
-      after(args) {
-        triggerNodeEventBreak(this, "transform-change", {
-          property: "position",
-          args,
-        });
-      },
-    });
-
-    wrapProtoMethod("setScale", {
-      after(args) {
-        triggerNodeEventBreak(this, "transform-change", {
-          property: "scale",
-          args,
-        });
-      },
-    });
-
-    wrapProtoMethod("setRotation", {
-      after(args) {
-        triggerNodeEventBreak(this, "transform-change", {
-          property: "rotation",
-          args,
-        });
-      },
-    });
-
-    wrapProtoMethod("setRotationFromEuler", {
-      after(args) {
-        triggerNodeEventBreak(this, "transform-change", {
-          property: "eulerAngles",
-          args,
-        });
-      },
-    });
-
-    wrapProtoMethod("setWorldPosition", {
-      after(args) {
-        triggerNodeEventBreak(this, "transform-change", {
-          property: "worldPosition",
-          args,
-        });
-      },
-    });
-
-    wrapProtoMethod("setWorldScale", {
-      after(args) {
-        triggerNodeEventBreak(this, "transform-change", {
-          property: "worldScale",
-          args,
-        });
-      },
-    });
-
-    wrapProtoMethod("setWorldRotation", {
-      after(args) {
-        triggerNodeEventBreak(this, "transform-change", {
-          property: "worldRotation",
-          args,
-        });
-      },
-    });
-
-    wrapProtoSetter("position", function (prev, next) {
-      if (transformsEqual(prev, next)) return;
-      triggerNodeEventBreak(this, "transform-change", {
-        property: "position",
-        previous: prev && typeof prev === "object" ? { x: prev.x, y: prev.y, z: prev.z } : prev,
-        next: next && typeof next === "object" ? { x: next.x, y: next.y, z: next.z } : next,
-      });
-    });
-
-    wrapProtoSetter("scale", function (prev, next) {
-      if (transformsEqual(prev, next)) return;
-      triggerNodeEventBreak(this, "transform-change", {
-        property: "scale",
-        previous: prev && typeof prev === "object" ? { x: prev.x, y: prev.y, z: prev.z } : prev,
-        next: next && typeof next === "object" ? { x: next.x, y: next.y, z: next.z } : next,
-      });
-    });
-
-    wrapProtoSetter("eulerAngles", function (prev, next) {
-      if (transformsEqual(prev, next)) return;
-      triggerNodeEventBreak(this, "transform-change", {
-        property: "eulerAngles",
-        previous: prev && typeof prev === "object" ? { x: prev.x, y: prev.y, z: prev.z } : prev,
-        next: next && typeof next === "object" ? { x: next.x, y: next.y, z: next.z } : next,
-      });
-    });
-
-    wrapProtoSetter("angle", function (prev, next) {
-      if (Number(prev) === Number(next)) return;
-      triggerNodeEventBreak(this, "transform-change", {
-        property: "angle",
-        previous: Number(prev),
-        next: Number(next),
-      });
-    });
-
-    proto.__animTracerNodeEventBreakHooked = true;
-    proto.__animTracerNodeEventBreakHookVersion = NODE_BREAK_HOOK_VERSION;
-    return true;
   }
 
   const HIGHLIGHT_STYLE_ID = "__animtracer-highlight-style__";
@@ -2843,7 +2786,6 @@
     if (!cc) return false;
 
     hookDirector(cc);
-    hookNodeEventBreaks(cc);
     setupPauseKeyboardShortcut();
 
     if (cc.game?.on) {
@@ -2888,6 +2830,7 @@
     registerNodeEventBreak,
     clearNodeEventBreaks,
     getNodeEventBreaks,
+    getNodeEventBreakTypes,
     highlightNode,
     clearNodeHighlight,
     init,
