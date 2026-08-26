@@ -1,5 +1,5 @@
 (function () {
-  const BRIDGE_VERSION = 24;
+  const BRIDGE_VERSION = 25;
   // Always refresh bridge API so extension reloads apply even if an older
   // inject already set window.__cocosHierarchyBridge__.
 
@@ -2781,6 +2781,68 @@
     }
   }
 
+  function animTracerLog(...args) {
+    console.log(
+      "%c AnimTracer ",
+      "color: white; background: rgba(100,100,255,125); padding: 2px 4px;",
+      ...args
+    );
+  }
+
+  /**
+   * Watch an object property and log every set (console helper).
+   * Usage: animTracer.watchProperty($c, "someProp")
+   *        animTracer.watchProperty(obj, "x", (v) => console.log(v))
+   */
+  function watchProperty(obj, prop, onSet) {
+    if (obj == null || prop == null || prop === "") {
+      return { ok: false, error: "obj and prop are required" };
+    }
+    let value = obj[prop];
+    Object.defineProperty(obj, prop, {
+      get() {
+        return value;
+      },
+      set(newVal) {
+        animTracerLog(obj, `Property "${prop}" changed:`, value, "→", newVal);
+        if (typeof onSet === "function") onSet(newVal);
+        value = newVal;
+      },
+      configurable: true,
+    });
+    animTracerLog(`Watching "${prop}" on`, obj);
+    return { ok: true, prop: String(prop) };
+  }
+
+  /**
+   * Watch an object property for a single change, then restore a plain value.
+   * Usage: animTracer.watchPropertyOneShot($n, "active")
+   */
+  function watchPropertyOneShot(obj, prop, onSet) {
+    if (obj == null || prop == null || prop === "") {
+      return { ok: false, error: "obj and prop are required" };
+    }
+    let value = obj[prop];
+    Object.defineProperty(obj, prop, {
+      get() {
+        return value;
+      },
+      set(newVal) {
+        animTracerLog(`Property "${prop}" changed:`, value, "→", newVal);
+        Object.defineProperty(obj, prop, {
+          value: newVal,
+          writable: true,
+          configurable: true,
+        });
+        if (typeof onSet === "function") onSet(newVal);
+        value = newVal;
+      },
+      configurable: true,
+    });
+    animTracerLog(`One-shot watching "${prop}" on`, obj);
+    return { ok: true, prop: String(prop) };
+  }
+
   function init() {
     const cc = getCocos();
     if (!cc) return false;
@@ -2836,6 +2898,12 @@
     init,
     isReady: () => !!getCocos(),
   };
+
+  // Console helpers: animTracer.watchProperty / animTracer.watchPropertyOneShot
+  window.animTracer = Object.assign(window.animTracer || {}, {
+    watchProperty,
+    watchPropertyOneShot,
+  });
 
   if (!init()) {
     let attempts = 0;
