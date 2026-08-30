@@ -26,6 +26,7 @@ const clearNodeBreaksBtn = document.getElementById("btn-clear-node-breaks");
 const nodeBreakListEl = document.getElementById("node-break-list");
 const gameSpeedRangeEl = document.getElementById("game-speed-range");
 const gameSpeedInputEl = document.getElementById("game-speed-input");
+const floatSpeedToggleBtnEl = document.getElementById("btn-toggle-float-speed");
 const pauseResumeBtnEl = document.getElementById("btn-pause-resume");
 const themeToggleBtnEl = document.getElementById("btn-theme-toggle");
 const toolsToggleBtnEl = document.getElementById("btn-toggle-tools");
@@ -94,6 +95,7 @@ const TREE_MAX_WIDTH = 900;
 const THEME_STORAGE_KEY = "animtracer-theme-preference";
 const TOOLS_PANEL_STORAGE_KEY = "animtracer-tools-panel-open";
 const TOOL_FEATURES_STORAGE_KEY = "animtracer-tool-features";
+const FLOAT_SPEED_PANEL_STORAGE_KEY = "animtracer-float-speed-panel";
 const MARKED_NODES_STORAGE_KEY = "animtracer-marked-node-uuids";
 const DEFAULT_TOOL_FEATURES = {
   "game-speed": true,
@@ -102,6 +104,7 @@ const DEFAULT_TOOL_FEATURES = {
   "node-breaks": true,
 };
 
+let floatSpeedPanelEnabled = true;
 let themePreference = "auto";
 let markedNodes = new Map(); // uuid -> { color }
 const MARK_COLOR_PALETTE = [
@@ -295,6 +298,14 @@ const EVAL_TOGGLE_PAUSE = `(() => {
 
 const EVAL_GET_PAUSE_STATE = `(() => {
   return window.__cocosHierarchyBridge__?.getPauseState() ?? { ok: false, paused: false };
+})()`;
+
+const EVAL_SET_FLOAT_SPEED_PANEL = (enabled) => `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.setGameSpeedOverlayEnabled !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page" };
+  }
+  return bridge.setGameSpeedOverlayEnabled(${enabled ? "true" : "false"});
 })()`;
 
 const EVAL_REGISTER_NODE_BREAK = (uuid, eventType) => `(() => {
@@ -671,6 +682,53 @@ function syncToolSettingsForm() {
   toolSettingsOverlayEl.querySelectorAll("[data-tool-setting]").forEach((input) => {
     const key = input.getAttribute("data-tool-setting");
     input.checked = isToolFeatureEnabled(key);
+  });
+}
+
+function loadFloatSpeedPanelPreference() {
+  try {
+    const stored = localStorage.getItem(FLOAT_SPEED_PANEL_STORAGE_KEY);
+    if (stored === "0" || stored === "1") {
+      return stored === "1";
+    }
+  } catch {}
+  return true;
+}
+
+function saveFloatSpeedPanelPreference(enabled) {
+  floatSpeedPanelEnabled = !!enabled;
+  try {
+    localStorage.setItem(FLOAT_SPEED_PANEL_STORAGE_KEY, floatSpeedPanelEnabled ? "1" : "0");
+  } catch {}
+}
+
+function updateFloatSpeedToggleUI() {
+  if (!floatSpeedToggleBtnEl) return;
+  floatSpeedToggleBtnEl.classList.toggle("active", floatSpeedPanelEnabled);
+  floatSpeedToggleBtnEl.setAttribute("aria-pressed", floatSpeedPanelEnabled ? "true" : "false");
+  floatSpeedToggleBtnEl.title = floatSpeedPanelEnabled
+    ? "Hide floating speed panel on page"
+    : "Show floating speed panel on page";
+  floatSpeedToggleBtnEl.textContent = floatSpeedPanelEnabled ? "Float on page: On" : "Float on page: Off";
+}
+
+function applyFloatSpeedPanelSetting() {
+  evalInPage(EVAL_SET_FLOAT_SPEED_PANEL(floatSpeedPanelEnabled));
+}
+
+function initFloatSpeedPanelToggle() {
+  floatSpeedPanelEnabled = loadFloatSpeedPanelPreference();
+  updateFloatSpeedToggleUI();
+  applyFloatSpeedPanelSetting();
+
+  floatSpeedToggleBtnEl?.addEventListener("click", () => {
+    saveFloatSpeedPanelPreference(!floatSpeedPanelEnabled);
+    updateFloatSpeedToggleUI();
+    applyFloatSpeedPanelSetting();
+    setToolStatus(
+      floatSpeedPanelEnabled ? "Floating speed panel enabled." : "Floating speed panel hidden.",
+      "ok"
+    );
   });
 }
 
@@ -2614,8 +2672,19 @@ function connectPort() {
     const tabId = chrome.devtools.inspectedWindow.tabId;
     port = chrome.runtime.connect({ name: `cocos-hierarchy-panel-${tabId}` });
     port.onMessage.addListener((msg) => {
-      if (msg.type === "cocos-hierarchy-event" && msg.payload?.type === "scene-changed") {
+      if (msg.type !== "cocos-hierarchy-event") return;
+      const payload = msg.payload;
+      if (!payload) return;
+      if (payload.type === "scene-changed") {
         refresh();
+        return;
+      }
+      if (payload.type === "game-speed-changed") {
+        updateGameSpeedUI(payload.speed);
+        return;
+      }
+      if (payload.type === "pause-state-changed") {
+        updatePauseResumeUI(payload.paused);
       }
     });
     port.onDisconnect.addListener(() => {
@@ -2630,6 +2699,7 @@ connectPort();
 initTheme();
 initToolsPanelToggle();
 initToolFeatureSettings();
+initFloatSpeedPanelToggle();
 initToolsPanelResizer();
 loadMarkedNodes();
 setBuildNote();

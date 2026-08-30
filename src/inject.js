@@ -1,5 +1,5 @@
 (function () {
-  const BRIDGE_VERSION = 25;
+  const BRIDGE_VERSION = 27;
   // Always refresh bridge API so extension reloads apply even if an older
   // inject already set window.__cocosHierarchyBridge__.
 
@@ -1756,10 +1756,13 @@
       return { ok: false, error: "Speed must be greater than 0" };
     }
 
-    if (isCocos2x(cc)) {
-      return setGameSpeedCocos2x(cc, numericSpeed);
+    const result = isCocos2x(cc)
+      ? setGameSpeedCocos2x(cc, numericSpeed)
+      : setGameSpeedCocos3x(cc, numericSpeed);
+    if (result?.ok) {
+      notifyGameSpeedChanged(result.speed);
     }
-    return setGameSpeedCocos3x(cc, numericSpeed);
+    return result;
   }
 
   function getGameSpeed() {
@@ -1846,6 +1849,7 @@
         return { ok: false, error: "resume not available on director or game" };
       }
       bridgePaused = nextPaused;
+      notifyPauseStateChanged(bridgePaused);
       return { ok: true, paused: bridgePaused };
     } catch (err) {
       return { ok: false, error: err?.message || String(err) };
@@ -2745,6 +2749,398 @@
     return clearNodeHighlight();
   }
 
+  const SPEED_PANEL_STYLE_ID = "animtracer-speed-panel-style";
+  const SPEED_PANEL_ID = "animtracer-speed-panel";
+  const SPEED_PANEL_TAB_ID = "animtracer-speed-panel-tab";
+  const SPEED_PANEL_STORAGE_KEY = "animtracer-speed-panel";
+
+  let speedPanelRefs = null;
+  let speedPanelEnabled = true;
+  let speedPanelCollapsed = false;
+
+  function clampGameSpeedValue(speed) {
+    const value = Number(speed);
+    if (!Number.isFinite(value)) return 1;
+    return Math.min(10, Math.max(0.1, value));
+  }
+
+  function loadSpeedPanelPrefs() {
+    try {
+      const raw = localStorage.getItem(SPEED_PANEL_STORAGE_KEY);
+      if (!raw) return { enabled: true, collapsed: false, left: null, top: 50 };
+      const parsed = JSON.parse(raw);
+      let collapsed = parsed?.collapsed === true;
+      if (parsed?.collapsed === undefined && parsed?.visible === false) {
+        collapsed = true;
+      }
+      return {
+        enabled: parsed?.enabled !== false,
+        collapsed,
+        left: Number.isFinite(Number(parsed?.left)) ? Number(parsed.left) : null,
+        top: Number.isFinite(Number(parsed?.top)) ? Number(parsed.top) : 50,
+      };
+    } catch {
+      return { enabled: true, collapsed: false, left: null, top: 50 };
+    }
+  }
+
+  function saveSpeedPanelPrefs(patch) {
+    try {
+      const current = loadSpeedPanelPrefs();
+      localStorage.setItem(
+        SPEED_PANEL_STORAGE_KEY,
+        JSON.stringify({ ...current, ...patch })
+      );
+    } catch {}
+  }
+
+  function notifyGameSpeedChanged(speed) {
+    updateGameSpeedOverlayUI(speed);
+    window.postMessage(
+      { source: "cocos-hierarchy", type: "game-speed-changed", speed },
+      "*"
+    );
+  }
+
+  function notifyPauseStateChanged(paused) {
+    updateGameSpeedOverlayPauseUI(paused);
+    window.postMessage(
+      { source: "cocos-hierarchy", type: "pause-state-changed", paused },
+      "*"
+    );
+  }
+
+  function ensureGameSpeedOverlayStyles() {
+    if (document.getElementById(SPEED_PANEL_STYLE_ID)) return;
+    const style = document.createElement("style");
+    style.id = SPEED_PANEL_STYLE_ID;
+    style.textContent = `
+      #${SPEED_PANEL_ID},
+      #${SPEED_PANEL_TAB_ID} {
+        font: 11px/1.4 "Lucida Grande", "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        color: #ebebeb;
+        z-index: 2147483647;
+      }
+      #${SPEED_PANEL_ID} {
+        position: fixed;
+        top: 50px;
+        right: 16px;
+        width: 245px;
+        background: rgba(26, 26, 26, 0.94);
+        border: 1px solid #2f2f2f;
+        border-radius: 3px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+        user-select: none;
+      }
+      #${SPEED_PANEL_ID}[hidden],
+      #${SPEED_PANEL_TAB_ID}[hidden] {
+        display: none !important;
+      }
+      #${SPEED_PANEL_ID} .atsp-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 6px 8px;
+        background: #111;
+        border-bottom: 1px solid #2f2f2f;
+        cursor: move;
+      }
+      #${SPEED_PANEL_ID} .atsp-title {
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+      #${SPEED_PANEL_ID} .atsp-close {
+        border: 0;
+        background: transparent;
+        color: #aaa;
+        cursor: pointer;
+        font-size: 14px;
+        line-height: 1;
+        padding: 0 2px;
+      }
+      #${SPEED_PANEL_ID} .atsp-close:hover {
+        color: #fff;
+      }
+      #${SPEED_PANEL_ID} .atsp-body {
+        padding: 8px;
+      }
+      #${SPEED_PANEL_ID} .atsp-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+      #${SPEED_PANEL_ID} .atsp-row label {
+        flex: 0 0 72px;
+        color: #d8d8d8;
+      }
+      #${SPEED_PANEL_ID} .atsp-row input[type="range"] {
+        flex: 1;
+        min-width: 0;
+        accent-color: #2fa1d6;
+      }
+      #${SPEED_PANEL_ID} .atsp-value {
+        flex: 0 0 34px;
+        text-align: right;
+        color: #2fa1d6;
+        font-variant-numeric: tabular-nums;
+      }
+      #${SPEED_PANEL_ID} .atsp-snaps {
+        display: flex;
+        gap: 4px;
+        margin-bottom: 8px;
+      }
+      #${SPEED_PANEL_ID} .atsp-snaps button,
+      #${SPEED_PANEL_ID} .atsp-pause {
+        flex: 1;
+        border: 1px solid #3a3a3a;
+        background: #2a2a2a;
+        color: #ebebeb;
+        border-radius: 2px;
+        padding: 4px 6px;
+        cursor: pointer;
+      }
+      #${SPEED_PANEL_ID} .atsp-snaps button:hover,
+      #${SPEED_PANEL_ID} .atsp-pause:hover {
+        background: #333;
+      }
+      #${SPEED_PANEL_ID} .atsp-snaps button.active {
+        background: #2fa1d6;
+        border-color: #2fa1d6;
+        color: #fff;
+      }
+      #${SPEED_PANEL_ID} .atsp-pause.paused {
+        background: #c0392b;
+        border-color: #c0392b;
+        color: #fff;
+      }
+      #${SPEED_PANEL_TAB_ID} {
+        position: fixed;
+        top: 50px;
+        right: 16px;
+        border: 1px solid #2f2f2f;
+        background: rgba(26, 26, 26, 0.94);
+        color: #ebebeb;
+        border-radius: 16px;
+        padding: 6px 12px;
+        cursor: pointer;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+      }
+      #${SPEED_PANEL_TAB_ID}:hover {
+        background: rgba(40, 40, 40, 0.96);
+      }
+    `;
+    document.documentElement.appendChild(style);
+  }
+
+  function updateGameSpeedOverlayUI(speed) {
+    if (!speedPanelRefs) return;
+    const value = clampGameSpeedValue(speed);
+    speedPanelRefs.range.value = String(value);
+    speedPanelRefs.value.textContent = `${value.toFixed(1)}x`;
+    speedPanelRefs.snaps.forEach((btn) => {
+      btn.classList.toggle("active", Number(btn.dataset.speed) === value);
+    });
+  }
+
+  function updateGameSpeedOverlayPauseUI(paused) {
+    if (!speedPanelRefs?.pauseBtn) return;
+    speedPanelRefs.pauseBtn.textContent = paused ? "Resume" : "Pause";
+    speedPanelRefs.pauseBtn.classList.toggle("paused", paused);
+  }
+
+  function applySpeedPanelVisibility() {
+    if (!speedPanelRefs) return;
+    if (!speedPanelEnabled) {
+      speedPanelRefs.panel.hidden = true;
+      speedPanelRefs.tab.hidden = true;
+      return;
+    }
+    speedPanelRefs.panel.hidden = speedPanelCollapsed;
+    speedPanelRefs.tab.hidden = !speedPanelCollapsed;
+  }
+
+  function setGameSpeedOverlayEnabled(enabled) {
+    speedPanelEnabled = enabled !== false;
+    saveSpeedPanelPrefs({ enabled: speedPanelEnabled });
+    ensureGameSpeedOverlayStyles();
+    if (!speedPanelRefs) setupGameSpeedOverlay();
+    applySpeedPanelVisibility();
+    return { ok: true, enabled: speedPanelEnabled };
+  }
+
+  function isGameSpeedOverlayEnabled() {
+    return speedPanelEnabled;
+  }
+
+  function setGameSpeedOverlayCollapsed(collapsed) {
+    if (!speedPanelEnabled) {
+      return { ok: false, error: "Floating speed panel is disabled in settings" };
+    }
+    speedPanelCollapsed = !!collapsed;
+    saveSpeedPanelPrefs({ collapsed: speedPanelCollapsed });
+    applySpeedPanelVisibility();
+    return { ok: true, collapsed: speedPanelCollapsed };
+  }
+
+  function setGameSpeedOverlayVisible(visible) {
+    return setGameSpeedOverlayEnabled(visible);
+  }
+
+  function isGameSpeedOverlayVisible() {
+    return speedPanelEnabled && !speedPanelCollapsed;
+  }
+
+  function setupGameSpeedOverlay() {
+    if (speedPanelRefs) return speedPanelRefs;
+
+    ensureGameSpeedOverlayStyles();
+    const prefs = loadSpeedPanelPrefs();
+    speedPanelEnabled = prefs.enabled;
+    speedPanelCollapsed = prefs.collapsed;
+    const currentSpeed = getGameSpeed();
+    const currentPause = getPauseState();
+    const speed = currentSpeed?.ok ? currentSpeed.speed : bridgeGameSpeed;
+
+    const panel = document.createElement("div");
+    panel.id = SPEED_PANEL_ID;
+
+    const header = document.createElement("div");
+    header.className = "atsp-header";
+    const title = document.createElement("span");
+    title.className = "atsp-title";
+    title.textContent = "AnimTracer";
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "atsp-close";
+    closeBtn.title = "Hide panel";
+    closeBtn.textContent = "×";
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+
+    const body = document.createElement("div");
+    body.className = "atsp-body";
+
+    const row = document.createElement("div");
+    row.className = "atsp-row";
+    const label = document.createElement("label");
+    label.textContent = "Game Speed";
+    const range = document.createElement("input");
+    range.type = "range";
+    range.min = "0.1";
+    range.max = "10";
+    range.step = "0.1";
+    range.value = String(clampGameSpeedValue(speed));
+    const valueEl = document.createElement("span");
+    valueEl.className = "atsp-value";
+    valueEl.textContent = `${clampGameSpeedValue(speed).toFixed(1)}x`;
+    row.appendChild(label);
+    row.appendChild(range);
+    row.appendChild(valueEl);
+
+    const snaps = document.createElement("div");
+    snaps.className = "atsp-snaps";
+    const snapButtons = [0.1, 1, 10].map((snapSpeed) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.dataset.speed = String(snapSpeed);
+      btn.textContent = `${snapSpeed}x`;
+      snaps.appendChild(btn);
+      return btn;
+    });
+
+    const pauseBtn = document.createElement("button");
+    pauseBtn.type = "button";
+    pauseBtn.className = "atsp-pause";
+    pauseBtn.textContent = "Pause";
+
+    body.appendChild(row);
+    body.appendChild(snaps);
+    body.appendChild(pauseBtn);
+    panel.appendChild(header);
+    panel.appendChild(body);
+
+    const tab = document.createElement("button");
+    tab.id = SPEED_PANEL_TAB_ID;
+    tab.type = "button";
+    tab.textContent = "Speed";
+    tab.title = "Show AnimTracer speed controls";
+
+    if (prefs.left != null) {
+      panel.style.left = `${prefs.left}px`;
+      panel.style.top = `${prefs.top}px`;
+      panel.style.right = "auto";
+    } else {
+      panel.style.top = `${prefs.top}px`;
+    }
+
+    document.documentElement.appendChild(panel);
+    document.documentElement.appendChild(tab);
+
+    speedPanelRefs = { panel, tab, range, value: valueEl, snaps: snapButtons, pauseBtn };
+
+    const applySpeed = (nextSpeed) => {
+      const result = setGameSpeed(nextSpeed);
+      if (!result?.ok) {
+        animTracerLog("Failed to set game speed:", result?.error || "unknown error");
+      }
+    };
+
+    range.addEventListener("input", () => {
+      applySpeed(range.value);
+    });
+    snapButtons.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        applySpeed(btn.dataset.speed);
+      });
+    });
+    pauseBtn.addEventListener("click", () => {
+      const result = togglePauseResume();
+      if (!result?.ok) {
+        animTracerLog("Failed to toggle pause:", result?.error || "unknown error");
+      }
+    });
+    closeBtn.addEventListener("click", () => {
+      setGameSpeedOverlayCollapsed(true);
+    });
+    tab.addEventListener("click", () => {
+      setGameSpeedOverlayCollapsed(false);
+    });
+
+    let dragStart = null;
+    header.addEventListener("mousedown", (event) => {
+      if (event.target.closest("button")) return;
+      const rect = panel.getBoundingClientRect();
+      dragStart = {
+        x: event.clientX,
+        y: event.clientY,
+        left: rect.left,
+        top: rect.top,
+      };
+      event.preventDefault();
+    });
+    window.addEventListener("mousemove", (event) => {
+      if (!dragStart) return;
+      const left = dragStart.left + event.clientX - dragStart.x;
+      const top = dragStart.top + event.clientY - dragStart.y;
+      panel.style.left = `${left}px`;
+      panel.style.top = `${top}px`;
+      panel.style.right = "auto";
+    });
+    window.addEventListener("mouseup", () => {
+      if (!dragStart) return;
+      const rect = panel.getBoundingClientRect();
+      saveSpeedPanelPrefs({ left: rect.left, top: rect.top });
+      dragStart = null;
+    });
+
+    updateGameSpeedOverlayUI(speed);
+    updateGameSpeedOverlayPauseUI(!!currentPause?.paused);
+    applySpeedPanelVisibility();
+    return speedPanelRefs;
+  }
+
   function setupPauseKeyboardShortcut() {
     if (window.__animTracerPauseKeyHandler) return;
     window.__animTracerPauseKeyHandler = (e) => {
@@ -2849,6 +3245,7 @@
 
     hookDirector(cc);
     setupPauseKeyboardShortcut();
+    setupGameSpeedOverlay();
 
     if (cc.game?.on) {
       cc.game.on("game_on_show", notifyUpdate);
@@ -2887,6 +3284,10 @@
     clearSkeletonBoneHighlight,
     setGameSpeed,
     getGameSpeed,
+    setGameSpeedOverlayEnabled,
+    isGameSpeedOverlayEnabled,
+    setGameSpeedOverlayVisible,
+    isGameSpeedOverlayVisible,
     togglePauseResume,
     getPauseState,
     registerNodeEventBreak,

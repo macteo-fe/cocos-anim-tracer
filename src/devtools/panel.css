@@ -591,6 +591,26 @@ body.resizing {
   background: var(--accent-bg);
 }
 
+.float-speed-toggle {
+  width: 100%;
+  margin-top: 8px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg3);
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.float-speed-toggle:hover,
+.float-speed-toggle.active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--text);
+}
+
 .pause-btn {
   width: 100%;
   margin-top: 8px;
