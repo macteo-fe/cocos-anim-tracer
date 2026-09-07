@@ -1,5 +1,5 @@
 (function () {
-  const BRIDGE_VERSION = 27;
+  const BRIDGE_VERSION = 28;
   // Always refresh bridge API so extension reloads apply even if an older
   // inject already set window.__cocosHierarchyBridge__.
 
@@ -2767,7 +2767,7 @@
   function loadSpeedPanelPrefs() {
     try {
       const raw = localStorage.getItem(SPEED_PANEL_STORAGE_KEY);
-      if (!raw) return { enabled: true, collapsed: false, left: null, top: 50 };
+      if (!raw) return { enabled: true, collapsed: false };
       const parsed = JSON.parse(raw);
       let collapsed = parsed?.collapsed === true;
       if (parsed?.collapsed === undefined && parsed?.visible === false) {
@@ -2776,11 +2776,9 @@
       return {
         enabled: parsed?.enabled !== false,
         collapsed,
-        left: Number.isFinite(Number(parsed?.left)) ? Number(parsed.left) : null,
-        top: Number.isFinite(Number(parsed?.top)) ? Number(parsed.top) : 50,
       };
     } catch {
-      return { enabled: true, collapsed: false, left: null, top: 50 };
+      return { enabled: true, collapsed: false };
     }
   }
 
@@ -2811,9 +2809,12 @@
   }
 
   function ensureGameSpeedOverlayStyles() {
-    if (document.getElementById(SPEED_PANEL_STYLE_ID)) return;
-    const style = document.createElement("style");
-    style.id = SPEED_PANEL_STYLE_ID;
+    let style = document.getElementById(SPEED_PANEL_STYLE_ID);
+    if (!style) {
+      style = document.createElement("style");
+      style.id = SPEED_PANEL_STYLE_ID;
+      document.documentElement.appendChild(style);
+    }
     style.textContent = `
       #${SPEED_PANEL_ID},
       #${SPEED_PANEL_TAB_ID} {
@@ -2825,12 +2826,15 @@
         position: fixed;
         top: 50px;
         right: 16px;
-        width: 245px;
+        left: auto;
+        width: min(245px, calc(100vw - 32px));
+        max-width: calc(100vw - 32px);
         background: rgba(26, 26, 26, 0.94);
         border: 1px solid #2f2f2f;
         border-radius: 3px;
         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
         user-select: none;
+        pointer-events: auto;
       }
       #${SPEED_PANEL_ID}[hidden],
       #${SPEED_PANEL_TAB_ID}[hidden] {
@@ -2844,7 +2848,6 @@
         padding: 6px 8px;
         background: #111;
         border-bottom: 1px solid #2f2f2f;
-        cursor: move;
       }
       #${SPEED_PANEL_ID} .atsp-title {
         font-weight: 600;
@@ -2919,6 +2922,7 @@
         position: fixed;
         top: 50px;
         right: 16px;
+        left: auto;
         border: 1px solid #2f2f2f;
         background: rgba(26, 26, 26, 0.94);
         color: #ebebeb;
@@ -2926,12 +2930,12 @@
         padding: 6px 12px;
         cursor: pointer;
         box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+        pointer-events: auto;
       }
       #${SPEED_PANEL_TAB_ID}:hover {
         background: rgba(40, 40, 40, 0.96);
       }
     `;
-    document.documentElement.appendChild(style);
   }
 
   function updateGameSpeedOverlayUI(speed) {
@@ -3003,7 +3007,13 @@
     const currentPause = getPauseState();
     const speed = currentSpeed?.ok ? currentSpeed.speed : bridgeGameSpeed;
 
-    const panel = document.createElement("div");
+    // Reuse existing DOM if inject reloaded, so we don't stack duplicate panels.
+    let panel = document.getElementById(SPEED_PANEL_ID);
+    let tab = document.getElementById(SPEED_PANEL_TAB_ID);
+    if (panel) panel.remove();
+    if (tab) tab.remove();
+
+    panel = document.createElement("div");
     panel.id = SPEED_PANEL_ID;
 
     const header = document.createElement("div");
@@ -3061,19 +3071,19 @@
     panel.appendChild(header);
     panel.appendChild(body);
 
-    const tab = document.createElement("button");
+    tab = document.createElement("button");
     tab.id = SPEED_PANEL_TAB_ID;
     tab.type = "button";
     tab.textContent = "Speed";
     tab.title = "Show AnimTracer speed controls";
 
-    if (prefs.left != null) {
-      panel.style.left = `${prefs.left}px`;
-      panel.style.top = `${prefs.top}px`;
-      panel.style.right = "auto";
-    } else {
-      panel.style.top = `${prefs.top}px`;
-    }
+    // Always stick to top-right; clear any leftover drag offsets from older builds.
+    panel.style.top = "50px";
+    panel.style.right = "16px";
+    panel.style.left = "auto";
+    tab.style.top = "50px";
+    tab.style.right = "16px";
+    tab.style.left = "auto";
 
     document.documentElement.appendChild(panel);
     document.documentElement.appendChild(tab);
@@ -3106,33 +3116,6 @@
     });
     tab.addEventListener("click", () => {
       setGameSpeedOverlayCollapsed(false);
-    });
-
-    let dragStart = null;
-    header.addEventListener("mousedown", (event) => {
-      if (event.target.closest("button")) return;
-      const rect = panel.getBoundingClientRect();
-      dragStart = {
-        x: event.clientX,
-        y: event.clientY,
-        left: rect.left,
-        top: rect.top,
-      };
-      event.preventDefault();
-    });
-    window.addEventListener("mousemove", (event) => {
-      if (!dragStart) return;
-      const left = dragStart.left + event.clientX - dragStart.x;
-      const top = dragStart.top + event.clientY - dragStart.y;
-      panel.style.left = `${left}px`;
-      panel.style.top = `${top}px`;
-      panel.style.right = "auto";
-    });
-    window.addEventListener("mouseup", () => {
-      if (!dragStart) return;
-      const rect = panel.getBoundingClientRect();
-      saveSpeedPanelPrefs({ left: rect.left, top: rect.top });
-      dragStart = null;
     });
 
     updateGameSpeedOverlayUI(speed);
