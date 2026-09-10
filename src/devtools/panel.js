@@ -16,6 +16,7 @@ const spineAnimationSuggestionsEl = document.getElementById("spine-animation-sug
 const spineAnimationSuggestionListEl = document.getElementById("spine-animation-suggestion-list");
 const traceSpineBtn = document.getElementById("btn-trace-spine");
 const clearSpineTraceBtn = document.getElementById("btn-clear-spine-trace");
+const logSpineAnimsBtn = document.getElementById("btn-log-spine-anims");
 const referenceResultsEl = document.getElementById("reference-results");
 const toolStatusEl = document.getElementById("tool-status");
 const buildNoteEl = document.getElementById("build-note");
@@ -274,6 +275,30 @@ const EVAL_CLEAR_SPINE_TRACE = (uuid) => `(() => {
     return { ok: false, error: "Bridge outdated — refresh the game page" };
   }
   return bridge.clearSpineAnimationTrace(${JSON.stringify(uuid)});
+})()`;
+
+const EVAL_LOG_ALL_SPINE = (uuid) => `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.logAllSpineAnimations !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page" };
+  }
+  return bridge.logAllSpineAnimations(${JSON.stringify(uuid)});
+})()`;
+
+const EVAL_STOP_LOG_ALL_SPINE = (uuid) => `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.stopLogAllSpineAnimations !== "function") {
+    return { ok: false, error: "Bridge outdated — refresh the game page" };
+  }
+  return bridge.stopLogAllSpineAnimations(${JSON.stringify(uuid)});
+})()`;
+
+const EVAL_SPINE_TRACE_STATE = (uuid) => `(() => {
+  const bridge = window.__cocosHierarchyBridge__;
+  if (!bridge || typeof bridge.getSpineAnimationTraceState !== "function") {
+    return { ok: false, logging: false };
+  }
+  return bridge.getSpineAnimationTraceState(${JSON.stringify(uuid)});
 })()`;
 
 const EVAL_SPINE_ANIMATION_NAMES = (uuid) => `(() => {
@@ -1056,7 +1081,36 @@ function updateSpineTraceToolVisibility(node) {
     spineAnimationSuggestionListEl.hidden = true;
     spineAnimationSuggestionListEl.innerHTML = "";
     spineAnimationNames = [];
+    updateSpineLogAllButtonUI(false);
+  } else {
+    syncSpineLogAllButtonState();
   }
+}
+
+function updateSpineLogAllButtonUI(logging) {
+  if (!logSpineAnimsBtn) return;
+  const active = !!logging;
+  logSpineAnimsBtn.classList.toggle("active", active);
+  logSpineAnimsBtn.setAttribute("aria-pressed", active ? "true" : "false");
+  logSpineAnimsBtn.textContent = active ? "Logging…" : "Log all";
+  logSpineAnimsBtn.title = active
+    ? "Stop logging setAnimation/addAnimation calls"
+    : "Log every setAnimation/addAnimation (name, trackIndex, loop)";
+}
+
+function syncSpineLogAllButtonState() {
+  const uuid = (refUuidInputEl.value || selectedUuid || "").trim();
+  if (!uuid || spineTraceToolEl.hidden) {
+    updateSpineLogAllButtonUI(false);
+    return;
+  }
+  evalInPage(EVAL_SPINE_TRACE_STATE(uuid), (result) => {
+    updateSpineLogAllButtonUI(!!result?.logging);
+  });
+}
+
+function getSelectedSpineNodeUuid() {
+  return (refUuidInputEl.value || selectedUuid || "").trim();
 }
 
 function registerNodeBreakFromUI() {
@@ -2595,7 +2649,7 @@ traceSpineBtn.addEventListener("click", () => {
     setToolStatus("Select a node with Skeleton/Spine component first.", "error");
     return;
   }
-  const uuid = (refUuidInputEl.value || selectedUuid || "").trim();
+  const uuid = getSelectedSpineNodeUuid();
   const animationName = (spineAnimationInputEl.value || "").trim();
   if (!uuid) {
     setToolStatus("Enter/select a node UUID first.", "error");
@@ -2617,12 +2671,42 @@ traceSpineBtn.addEventListener("click", () => {
     setToolStatus(result.message || "Spine trace attached.", "ok");
   });
 });
+logSpineAnimsBtn.addEventListener("click", () => {
+  if (spineTraceToolEl.hidden) {
+    setToolStatus("Select a node with Skeleton/Spine component first.", "error");
+    return;
+  }
+  const uuid = getSelectedSpineNodeUuid();
+  if (!uuid) {
+    setToolStatus("Enter/select a node UUID first.", "error");
+    return;
+  }
+
+  const stopping = logSpineAnimsBtn.classList.contains("active");
+  const evalCode = stopping ? EVAL_STOP_LOG_ALL_SPINE(uuid) : EVAL_LOG_ALL_SPINE(uuid);
+  evalInPage(evalCode, (result, err) => {
+    if (err) {
+      setToolStatus(err, "error");
+      return;
+    }
+    if (!result?.ok) {
+      setToolStatus(result?.error || "Failed to toggle animation logging.", "error");
+      return;
+    }
+    updateSpineLogAllButtonUI(!!result.logging);
+    setToolStatus(
+      result.message ||
+        (result.logging ? "Logging all spine animations." : "Stopped logging spine animations."),
+      "ok"
+    );
+  });
+});
 clearSpineTraceBtn.addEventListener("click", () => {
   if (spineTraceToolEl.hidden) {
     setToolStatus("Select a node with Skeleton/Spine component first.", "error");
     return;
   }
-  const uuid = (refUuidInputEl.value || selectedUuid || "").trim();
+  const uuid = getSelectedSpineNodeUuid();
   if (!uuid) {
     setToolStatus("Enter/select a node UUID first.", "error");
     return;
@@ -2636,6 +2720,7 @@ clearSpineTraceBtn.addEventListener("click", () => {
       setToolStatus(result?.error || "Failed to clear trace.", "error");
       return;
     }
+    updateSpineLogAllButtonUI(false);
     setToolStatus(result.message || "Spine trace cleared.", "ok");
   });
 });

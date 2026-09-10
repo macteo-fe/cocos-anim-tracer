@@ -1,5 +1,5 @@
 (function () {
-  const BRIDGE_VERSION = 28;
+  const BRIDGE_VERSION = 31;
   // Always refresh bridge API so extension reloads apply even if an older
   // inject already set window.__cocosHierarchyBridge__.
 
@@ -1236,60 +1236,122 @@
     return comps.find((comp) => isSkeletonLikeComponent(comp)) || null;
   }
 
-  function traceSpineAnimation(nodeUuid, animationName) {
-    const uuid = String(nodeUuid || "").trim();
-    const anim = String(animationName || "").trim();
-    if (!uuid) return { ok: false, error: "Node UUID is required" };
-    if (!anim) return { ok: false, error: "Animation name is required" };
+  function parseSpineAnimationCallArgs(args) {
+    // Cocos Spine: setAnimation(trackIndex, name, loop?) / addAnimation(trackIndex, name, loop?, delay?)
+    // Fallback some wrappers: setAnimation(name, loop?)
+    if (typeof args[0] === "number" && (typeof args[1] === "string" || args[1] == null)) {
+      return {
+        trackIndex: args[0],
+        name: args[1],
+        loop: typeof args[2] === "boolean" ? args[2] : !!args[2],
+        delay: args[3],
+      };
+    }
+    if (typeof args[0] === "string") {
+      return {
+        trackIndex: 0,
+        name: args[0],
+        loop: typeof args[1] === "boolean" ? args[1] : !!args[1],
+        delay: args[2],
+      };
+    }
+    return {
+      trackIndex: args[0],
+      name: args[1] ?? args[0],
+      loop: typeof args[2] === "boolean" ? args[2] : !!args[2],
+      delay: args[3],
+    };
+  }
 
-    const node = getNodeByUuid(uuid);
-    if (!node) return { ok: false, error: `Node not found for UUID: ${uuid}` };
+  function logSpineAnimationCall(method, node, spine, parsed) {
+    const label = method === "addAnimation" ? "Spine addAnimation" : "Spine setAnimation";
+    console.groupCollapsed(
+      `%c AnimTracer %c ${label} `,
+      "background:#1a73e8;color:#fff;padding:1px 4px;border-radius:3px 0 0 3px;",
+      "background:#c586c0;color:#fff;padding:1px 4px;border-radius:0 3px 3px 0;"
+    );
+    console.log("node:", node?.name, node);
+    console.log("spine:", spine);
+    console.log("animation:", parsed.name);
+    console.log("trackIndex:", parsed.trackIndex);
+    console.log("loop:", parsed.loop);
+    if (method === "addAnimation" && parsed.delay !== undefined) {
+      console.log("delay:", parsed.delay);
+    }
+    console.trace();
+    console.groupEnd();
+  }
 
-    const spine = findSpineComponent(node);
-    if (!spine) return { ok: false, error: "Selected node has no Spine/Skeleton component" };
+  function installSpineAnimationHooks(node, spine) {
+    if (!spine) return false;
+    let installed = false;
 
     if (!spine.__animTracerOriginalSetAnimation && typeof spine.setAnimation === "function") {
       spine.__animTracerOriginalSetAnimation = spine.setAnimation.bind(spine);
       spine.setAnimation = function (...args) {
-        const name = args[1] ?? args[0];
-        if (String(name) === anim) {
+        const parsed = parseSpineAnimationCallArgs(args);
+        if (spine.__animTracerLogAllAnimations) {
+          logSpineAnimationCall("setAnimation", node, spine, parsed);
+        }
+        const target = spine.__animTracerTraceAnimationName;
+        if (target && String(parsed.name) === String(target)) {
           console.groupCollapsed(
             "%c AnimTracer %c Spine animation hit ",
             "background:#1a73e8;color:#fff;padding:1px 4px;border-radius:3px 0 0 3px;",
-            "background:#34a853;color:#fff;padding:1px 4px;border-radius:0 3px 3px 0;",
+            "background:#34a853;color:#fff;padding:1px 4px;border-radius:0 3px 3px 0;"
           );
           console.log("node:", node);
-          console.log("animation:", name);
+          console.log("animation:", parsed.name);
+          console.log("trackIndex:", parsed.trackIndex);
+          console.log("loop:", parsed.loop);
           console.trace();
           console.groupEnd();
           debugger;
         }
         return spine.__animTracerOriginalSetAnimation(...args);
       };
+      installed = true;
     }
 
     if (!spine.__animTracerOriginalAddAnimation && typeof spine.addAnimation === "function") {
       spine.__animTracerOriginalAddAnimation = spine.addAnimation.bind(spine);
       spine.addAnimation = function (...args) {
-        const name = args[1] ?? args[0];
-        if (String(name) === anim) {
+        const parsed = parseSpineAnimationCallArgs(args);
+        if (spine.__animTracerLogAllAnimations) {
+          logSpineAnimationCall("addAnimation", node, spine, parsed);
+        }
+        const target = spine.__animTracerTraceAnimationName;
+        if (target && String(parsed.name) === String(target)) {
           console.groupCollapsed(
             "%c AnimTracer %c Spine queued animation hit ",
             "background:#1a73e8;color:#fff;padding:1px 4px;border-radius:3px 0 0 3px;",
-            "background:#34a853;color:#fff;padding:1px 4px;border-radius:0 3px 3px 0;",
+            "background:#34a853;color:#fff;padding:1px 4px;border-radius:0 3px 3px 0;"
           );
           console.log("node:", node);
-          console.log("animation:", name);
+          console.log("animation:", parsed.name);
+          console.log("trackIndex:", parsed.trackIndex);
+          console.log("loop:", parsed.loop);
+          if (parsed.delay !== undefined) console.log("delay:", parsed.delay);
           console.trace();
           console.groupEnd();
           debugger;
         }
         return spine.__animTracerOriginalAddAnimation(...args);
       };
+      installed = true;
     }
 
-    spine.__animTracerTraceAnimationName = anim;
-    return { ok: true, message: `Tracing animation "${anim}" on node "${node.name}"` };
+    return installed;
+  }
+
+  function spineHasActiveTrace(spine) {
+    return !!(
+      spine &&
+      (spine.__animTracerTraceAnimationName ||
+        spine.__animTracerLogAllAnimations ||
+        spine.__animTracerOriginalSetAnimation ||
+        spine.__animTracerOriginalAddAnimation)
+    );
   }
 
   function restoreSpineTraceHooks(spine) {
@@ -1309,25 +1371,163 @@
       delete spine.__animTracerTraceAnimationName;
       cleared = true;
     }
+    if (spine.__animTracerLogAllAnimations !== undefined) {
+      delete spine.__animTracerLogAllAnimations;
+      cleared = true;
+    }
     return cleared;
   }
 
-  function clearSpineAnimationTrace(nodeUuid) {
-    const uuid = String(nodeUuid || "").trim();
-    if (!uuid) return { ok: false, error: "Node UUID is required" };
+  function maybeRestoreSpineHooks(spine) {
+    if (!spine) return false;
+    if (spine.__animTracerTraceAnimationName || spine.__animTracerLogAllAnimations) {
+      return false;
+    }
+    return restoreSpineTraceHooks(spine);
+  }
 
-    const node = getNodeByUuid(uuid);
-    if (!node) return { ok: false, error: `Node not found for UUID: ${uuid}` };
+  /**
+   * Break when Spine plays a specific animation via setAnimation/addAnimation.
+   * Usage: animTracer.traceSpineAnimation("idle")
+   *        animTracer.traceSpineAnimation($n, "idle")
+   *        animTracer.traceSpineAnimation($c, "win")
+   *        animTracer.traceSpineAnimation(uuid, "idle")
+   * Clear: animTracer.clearSpineAnimationTrace()
+   */
+  function traceSpineAnimation(targetOrAnim, maybeAnim) {
+    let target = targetOrAnim;
+    let anim = maybeAnim;
 
-    const spine = findSpineComponent(node);
-    if (!spine) return { ok: false, error: "Selected node has no Spine/Skeleton component" };
+    // Console-friendly: animTracer.traceSpineAnimation("idle") → use $n/$c
+    if (maybeAnim == null) {
+      if (typeof targetOrAnim !== "string" || !String(targetOrAnim).trim()) {
+        return { ok: false, error: "Animation name is required" };
+      }
+      target = null;
+      anim = targetOrAnim;
+    }
 
+    anim = String(anim || "").trim();
+    if (!anim) return { ok: false, error: "Animation name is required" };
+
+    const resolved = resolveSpineTarget(target);
+    if (!resolved.ok) return resolved;
+
+    const { node, spine } = resolved;
+    installSpineAnimationHooks(node, spine);
+    spine.__animTracerTraceAnimationName = anim;
+    animTracerLog(`Tracing animation "${anim}" on node "${node.name}"`);
+    return { ok: true, message: `Tracing animation "${anim}" on node "${node.name}"` };
+  }
+
+  function resolveSpineTarget(target) {
+    // Accept: uuid string | node | spine/skeleton component | undefined ($n / $c)
+    let node = null;
+    let spine = null;
+    let uuid = "";
+
+    if (target == null || target === "") {
+      node = window.$n || null;
+      spine = findSpineComponent(node) || (isSkeletonLikeComponent(window.$c) ? window.$c : null);
+      if (!node && spine?.node) node = spine.node;
+    } else if (typeof target === "string") {
+      uuid = target.trim();
+      node = getNodeByUuid(uuid);
+      spine = findSpineComponent(node);
+    } else if (isSkeletonLikeComponent(target)) {
+      spine = target;
+      node = target.node || window.$n || null;
+    } else if (target?._components || target?.uuid || target?.name != null) {
+      node = target;
+      spine = findSpineComponent(node);
+    }
+
+    if (!node && spine?.node) node = spine.node;
+    if (!uuid && node) {
+      try {
+        uuid = String(node.uuid || node._id || "");
+      } catch {
+        uuid = "";
+      }
+    }
+
+    if (!node) return { ok: false, error: "Node not found (pass uuid, $n, or spine component)" };
+    if (!spine) {
+      return { ok: false, error: `Node "${node.name || uuid}" has no Spine/Skeleton component` };
+    }
+    return { ok: true, node, spine, uuid };
+  }
+
+  /**
+   * Log every Spine setAnimation/addAnimation (name, trackIndex, loop).
+   * Usage: animTracer.logAllSpineAnimations()
+   *        animTracer.logAllSpineAnimations($n)
+   *        animTracer.logAllSpineAnimations($c)
+   *        animTracer.logAllSpineAnimations(uuid)
+   * Stop:  animTracer.stopLogAllSpineAnimations()
+   * Clear: animTracer.clearSpineAnimationTrace()
+   */
+  function logAllSpineAnimations(target) {
+    const resolved = resolveSpineTarget(target);
+    if (!resolved.ok) return resolved;
+
+    const { node, spine } = resolved;
+    installSpineAnimationHooks(node, spine);
+    spine.__animTracerLogAllAnimations = true;
+    animTracerLog(
+      `Logging all setAnimation/addAnimation on "${node.name}" (trackIndex + loop)`
+    );
+    return {
+      ok: true,
+      logging: true,
+      message: `Logging all setAnimation/addAnimation on "${node.name}" (trackIndex + loop)`,
+    };
+  }
+
+  function stopLogAllSpineAnimations(target) {
+    const resolved = resolveSpineTarget(target);
+    if (!resolved.ok) return resolved;
+
+    const { node, spine } = resolved;
+    if (!spine.__animTracerLogAllAnimations) {
+      return { ok: true, logging: false, message: "Animation logging was not active" };
+    }
+
+    delete spine.__animTracerLogAllAnimations;
+    maybeRestoreSpineHooks(spine);
+    animTracerLog(`Stopped logging animations on "${node.name}"`);
+    return {
+      ok: true,
+      logging: false,
+      message: `Stopped logging animations on "${node.name}"`,
+    };
+  }
+
+  function getSpineAnimationTraceState(target) {
+    const resolved = resolveSpineTarget(target);
+    if (!resolved.ok) return resolved;
+
+    const { spine } = resolved;
+    return {
+      ok: true,
+      logging: !!spine.__animTracerLogAllAnimations,
+      traceAnimation: spine.__animTracerTraceAnimationName || null,
+      active: spineHasActiveTrace(spine),
+    };
+  }
+
+  function clearSpineAnimationTrace(target) {
+    const resolved = resolveSpineTarget(target);
+    if (!resolved.ok) return resolved;
+
+    const { node, spine } = resolved;
     const cleared = restoreSpineTraceHooks(spine);
     return {
       ok: true,
       cleared,
+      logging: false,
       message: cleared
-        ? `Cleared spine trace on node "${node.name}"`
+        ? `Cleared spine trace/log on node "${node.name}"`
         : "No active spine trace on this node",
     };
   }
@@ -3260,6 +3460,9 @@
     setActive,
     findNodeReferences,
     traceSpineAnimation,
+    logAllSpineAnimations,
+    stopLogAllSpineAnimations,
+    getSpineAnimationTraceState,
     clearSpineAnimationTrace,
     getSpineAnimationNames,
     getSkeletonBoneTree,
@@ -3283,10 +3486,15 @@
     isReady: () => !!getCocos(),
   };
 
-  // Console helpers: animTracer.watchProperty / animTracer.watchPropertyOneShot
+  // Console helpers: animTracer.watchProperty / logAllSpineAnimations / ...
   window.animTracer = Object.assign(window.animTracer || {}, {
     watchProperty,
     watchPropertyOneShot,
+    traceSpineAnimation,
+    logAllSpineAnimations,
+    stopLogAllSpineAnimations,
+    clearSpineAnimationTrace,
+    getSpineAnimationTraceState,
   });
 
   if (!init()) {

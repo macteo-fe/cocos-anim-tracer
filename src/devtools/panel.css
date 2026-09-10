@@ -611,6 +611,12 @@ body.resizing {
   color: var(--text);
 }
 
+.spine-log-toggle.active {
+  border-color: var(--spine);
+  background: var(--spine-bg);
+  color: var(--spine);
+}
+
 .pause-btn {
   width: 100%;
   margin-top: 8px;
