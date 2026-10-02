@@ -103,6 +103,7 @@ const DEFAULT_TOOL_FEATURES = {
   "find-refs": true,
   "spine-trace": true,
   "node-breaks": true,
+  "node-properties": true,
 };
 
 let floatSpeedPanelEnabled = true;
@@ -769,6 +770,24 @@ function applyToolFeatureVisibility() {
   updateSpineTraceToolVisibility(selectedNode);
 }
 
+function applyNodePropertiesFeature() {
+  const selectedNode =
+    hierarchy?.tree && selectedUuid ? findNode(hierarchy.tree, selectedUuid) : null;
+  if (!isToolFeatureEnabled("node-properties")) {
+    nodeProperties = [];
+    nodePropertiesStatus = "idle";
+    nodePropertiesError = "";
+    lastNodePropsRaw = "";
+    lastNodePropsUuid = "";
+    if (selectedNode) renderDetail(selectedNode);
+    return;
+  }
+  if (!selectedNode) return;
+  nodePropertiesStatus = "loading";
+  renderDetail(selectedNode);
+  loadNodeProperties(selectedNode.uuid);
+}
+
 function openToolSettings() {
   syncToolSettingsForm();
   toolSettingsOverlayEl.hidden = false;
@@ -803,6 +822,7 @@ function initToolFeatureSettings() {
       toolFeatures[key] = !!input.checked;
       saveToolFeatures();
       applyToolFeatureVisibility();
+      if (key === "node-properties") applyNodePropertiesFeature();
     });
   });
 }
@@ -1354,7 +1374,9 @@ function focusReferenceHolder(nodeUuid) {
     updateSpineTraceToolVisibility(node);
     updateBreakNodeTargetLabel(node);
     evalInPage(EVAL_SELECT(nodeUuid), () => {});
-    nodePropertiesStatus = "loading";
+    if (isToolFeatureEnabled("node-properties")) {
+      nodePropertiesStatus = "loading";
+    }
     renderDetail(node);
     loadNodeProperties(nodeUuid);
   }
@@ -1647,7 +1669,9 @@ function selectNode(node) {
   updateSpineTraceToolVisibility(node);
   updateBreakNodeTargetLabel(node);
   evalInPage(EVAL_SELECT(node.uuid), () => {});
-  nodePropertiesStatus = "loading";
+  if (isToolFeatureEnabled("node-properties")) {
+    nodePropertiesStatus = "loading";
+  }
   renderDetail(node);
   loadNodeProperties(node.uuid);
   renderTree();
@@ -1863,6 +1887,7 @@ function renderPropRowsHtml(properties, scope) {
 }
 
 function renderNodePropertiesHtml() {
+  if (!isToolFeatureEnabled("node-properties")) return "";
   if (nodePropertiesStatus === "loading" || nodePropertiesStatus === "idle") {
     return `
       <div class="component-props">
@@ -2269,6 +2294,7 @@ function bindPropertyEditors(node) {
 }
 
 function loadNodeProperties(uuid, options = {}) {
+  if (!isToolFeatureEnabled("node-properties")) return;
   const { silent = false } = options;
   if (!silent || nodePropertiesStatus !== "ready") {
     nodePropertiesStatus = "loading";
