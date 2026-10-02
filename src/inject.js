@@ -3422,6 +3422,29 @@
     return { ok: true, prop: String(prop) };
   }
 
+  /**
+   * Break into the debugger whenever a property is set (no value logging).
+   * Usage: animTracer.breakOnSet($c, "someProp")
+   */
+  function breakOnSet(obj, propertyName) {
+    if (obj == null || propertyName == null || propertyName === "") {
+      return { ok: false, error: "obj and propertyName are required" };
+    }
+    let value = obj[propertyName];
+    Object.defineProperty(obj, propertyName, {
+      get() {
+        return value;
+      },
+      set(newVal) {
+        debugger;
+        value = newVal;
+      },
+      configurable: true,
+    });
+    animTracerLog(`Break-on-set enabled for "${propertyName}" on`, obj);
+    return { ok: true, prop: String(propertyName) };
+  }
+
   function init() {
     const cc = getCocos();
     if (!cc) return false;
@@ -3486,10 +3509,11 @@
     isReady: () => !!getCocos(),
   };
 
-  // Console helpers: animTracer.watchProperty / logAllSpineAnimations / ...
+  // Console helpers: animTracer.watchProperty / breakOnSet / logAllSpineAnimations / ...
   window.animTracer = Object.assign(window.animTracer || {}, {
     watchProperty,
     watchPropertyOneShot,
+    breakOnSet,
     traceSpineAnimation,
     logAllSpineAnimations,
     stopLogAllSpineAnimations,
